@@ -1,0 +1,69 @@
+services:
+  manager:
+    build: .
+    command: ["python", "-m", "mycoagent", "manager", "--host", "0.0.0.0", "--port", "8080", "--bootstrap-group", "default"]
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  node-a:
+    build: .
+    command:
+      - python
+      - -m
+      - mycoagent
+      - node
+      - --manager
+      - http://manager:8080
+      - --group
+      - default
+      - --name
+      - alpha
+      - --host
+      - 0.0.0.0
+      - --port
+      - "9000"
+      - --advertise
+      - http://node-a:9000
+      - --skills
+      - coding
+      - --tools
+      - shell
+    ports:
+      - "9001:9000"
+    depends_on:
+      manager:
+        condition: service_healthy
+
+  node-b:
+    build: .
+    command:
+      - python
+      - -m
+      - mycoagent
+      - node
+      - --manager
+      - http://manager:8080
+      - --group
+      - default
+      - --name
+      - beta
+      - --host
+      - 0.0.0.0
+      - --port
+      - "9000"
+      - --advertise
+      - http://node-b:9000
+      - --skills
+      - coding
+      - --tools
+      - shell
+    ports:
+      - "9002:9000"
+    depends_on:
+      manager:
+        condition: service_healthy
