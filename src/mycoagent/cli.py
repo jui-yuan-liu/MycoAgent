@@ -9,11 +9,11 @@ import uvicorn
 
 from mycoagent.manager.api import create_app
 from mycoagent.manager.store import ManagerStore
-from mycoagent.models import JobSubmitRequest, SubtaskSpec
+from mycoagent.models import ForwardRequest, JobSubmitRequest, SubtaskSpec
 from mycoagent.node.api import create_node_app
 from mycoagent.node.runtime import NodeRuntime
 
-app = typer.Typer(no_args_is_help=True, help="MycoAgent phase-1: groups, catalog, nodes")
+app = typer.Typer(no_args_is_help=True, help="MycoAgent: groups, catalog, nodes, policies")
 ctl = typer.Typer(no_args_is_help=True, help="Admin commands against Cluster Manager")
 app.add_typer(ctl, name="ctl")
 
@@ -64,9 +64,84 @@ def node(
     uvicorn.run(create_node_app(runtime), host=host, port=port)
 
 
+def _csv(value: Optional[str]) -> list[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
 @ctl.command("groups-create")
-def groups_create(name: str, manager_url: str = typer.Option("http://127.0.0.1:8080", "--manager")) -> None:
-    response = httpx.post(f"{manager_url.rstrip('/')}/groups", json={"name": name}, timeout=10.0)
+def groups_create(
+    name: str,
+    manager_url: str = typer.Option("http://127.0.0.1:8080", "--manager"),
+    description: str = typer.Option("", "--description"),
+    join_mode: str = typer.Option("auto", "--join-mode"),
+    allow_register: Optional[str] = typer.Option(None, help="Comma-separated node names; empty = anyone"),
+    allow_parent: Optional[str] = typer.Option(None, help="Comma-separated node names or ids; empty = any member"),
+) -> None:
+    response = httpx.post(
+        f"{manager_url.rstrip('/')}/groups",
+        json={
+            "name": name,
+            "description": description,
+            "join_mode": join_mode,
+            "allow_register": _csv(allow_register),
+            "allow_parent": _csv(allow_parent),
+        },
+        timeout=10.0,
+    )
+    _print_response(response)
+
+
+@ctl.command("groups-update")
+def groups_update(
+    name: str,
+    manager_url: str = typer.Option("http://127.0.0.1:8080", "--manager"),
+    description: Optional[str] = typer.Option(None, "--description"),
+    join_mode: Optional[str] = typer.Option(None, "--join-mode"),
+    allow_register: Optional[str] = typer.Option(None, help="Comma-separated names; pass empty string to clear"),
+    allow_parent: Optional[str] = typer.Option(None, help="Comma-separated names or ids; pass empty string to clear"),
+) -> None:
+    body: dict[str, object] = {}
+    if description is not None:
+        body["description"] = description
+    if join_mode is not None:
+        body["join_mode"] = join_mode
+    if allow_register is not None:
+        body["allow_register"] = _csv(allow_register)
+    if allow_parent is not None:
+        body["allow_parent"] = _csv(allow_parent)
+    response = httpx.patch(f"{manager_url.rstrip('/')}/groups/{name}", json=body, timeout=10.0)
+    _print_response(response)
+
+
+@ctl.command("group")
+def group_get(name: str, manager_url: str = typer.Option("http://127.0.0.1:8080", "--manager")) -> None:
+    response = httpx.get(f"{manager_url.rstrip('/')}/groups/{name}", timeout=10.0)
+    _print_response(response)
+
+
+@ctl.command("approve")
+def approve(
+    group: str,
+    node_id: str,
+    manager_url: str = typer.Option("http://127.0.0.1:8080", "--manager"),
+) -> None:
+    response = httpx.post(
+        f"{manager_url.rstrip('/')}/groups/{group}/approve/{node_id}", timeout=10.0
+    )
+    _print_response(response)
+
+
+@ctl.command("deny")
+def deny(
+    group: str,
+    node_id: str,
+    manager_url: str = typer.Option("http://127.0.0.1:8080", "--manager"),
+) -> None:
+    response = httpx.post(
+        f"{manager_url.rstrip('/')}/groups/{group}/deny/{node_id}", timeout=10.0
+    )
     _print_response(response)
 
 
@@ -122,6 +197,31 @@ def submit(
 @ctl.command("job")
 def job_get(job_id: str, node_url: str = typer.Option(..., "--node")) -> None:
     response = httpx.get(f"{node_url.rstrip('/')}/jobs/{job_id}", timeout=10.0)
+    _print_response(response)
+
+
+@ctl.command("forward")
+def forward(
+    job_id: str,
+    node_url: str = typer.Option(..., "--node"),
+    description: str = typer.Option(...),
+    source_subtask: Optional[str] = typer.Option(None, "--from-subtask"),
+    target: Optional[str] = typer.Option(None, "--target", help="Child node id to receive the follow-up"),
+    skills: Optional[str] = None,
+    tools: Optional[str] = None,
+) -> None:
+    body = ForwardRequest(
+        description=description,
+        skills=_csv(skills),
+        tools=_csv(tools),
+        source_subtask_id=source_subtask,
+        target_node_id=target,
+    )
+    response = httpx.post(
+        f"{node_url.rstrip('/')}/jobs/{job_id}/forward",
+        json=body.model_dump(mode="json"),
+        timeout=30.0,
+    )
     _print_response(response)
 
 

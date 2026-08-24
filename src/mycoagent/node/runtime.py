@@ -9,12 +9,15 @@ from mycoagent.models import (
     CatalogQuery,
     ChildWork,
     Envelope,
+    ForwardRequest,
     HeartbeatRequest,
     JobMemory,
     JobSubmitRequest,
+    MembershipStatus,
     NodeRecord,
     NodeRegisterRequest,
     NodeStatus,
+    SubtaskRecord,
     SubtaskResultMessage,
     SubtaskSpec,
     SubtaskStatus,
@@ -32,6 +35,10 @@ class BusyError(RuntimeError):
 
 
 class DispatchError(RuntimeError):
+    pass
+
+
+class ParentForbidden(PermissionError):
     pass
 
 
@@ -110,6 +117,7 @@ class NodeRuntime:
     async def submit_job(self, request: JobSubmitRequest) -> JobMemory:
         if not self.node_id:
             raise RuntimeError("node is not registered")
+        await self._assert_can_parent()
         job = await self.jobs.create(self.node_id, request.description, request.subtasks)
         if not request.subtasks:
             local = await self.executor.run(
@@ -135,6 +143,52 @@ class NodeRuntime:
                     error=str(exc),
                 )
         refreshed = await self.jobs.get(job.job_id)
+        assert refreshed is not None
+        return refreshed
+
+    async def forward_subtask(self, job_id: str, request: ForwardRequest) -> JobMemory:
+        if not self.node_id:
+            raise RuntimeError("node is not registered")
+        if self._current_child is not None and self._current_child.job_id == job_id:
+            raise DispatchError("child cannot re-dispatch the same job")
+        job = await self.jobs.get(job_id)
+        if job is None:
+            raise KeyError(f"job memory not on this node: {job_id}")
+        if job.parent_node_id != self.node_id:
+            raise DispatchError("only the parent may forward")
+        payload = dict(request.payload)
+        exclude: set[str] = {self.node_id}
+        if request.source_subtask_id:
+            source = _find_subtask(job, request.source_subtask_id)
+            if source is None:
+                raise KeyError(request.source_subtask_id)
+            payload["source_subtask_id"] = source.id
+            payload["source_result"] = source.result
+            if source.assignee_node_id:
+                exclude.add(source.assignee_node_id)
+        spec = SubtaskSpec(
+            description=request.description,
+            skills=request.skills,
+            tools=request.tools,
+            payload=payload,
+        )
+        _, record = await self.jobs.add_subtask(job_id, spec)
+        try:
+            await self._dispatch(
+                job_id,
+                record.id,
+                spec,
+                exclude_node_ids=exclude,
+                target_node_id=request.target_node_id,
+            )
+        except DispatchError as exc:
+            await self.jobs.update_subtask(
+                job_id,
+                record.id,
+                status=SubtaskStatus.FAILED,
+                error=str(exc),
+            )
+        refreshed = await self.jobs.get(job_id)
         assert refreshed is not None
         return refreshed
 
@@ -206,23 +260,58 @@ class NodeRuntime:
             assignee_node_id=message.child_node_id,
         )
 
-    async def _dispatch(self, job_id: str, subtask_id: str, spec: SubtaskSpec | Any) -> None:
-        candidates = await self.manager.catalog(
-            CatalogQuery(
-                group=self.group,
-                idle_only=True,
-                skills=list(spec.skills),
-                tools=list(spec.tools),
-                exclude_node_id=self.node_id,
+    async def _assert_can_parent(self) -> None:
+        if not self.node_id:
+            raise RuntimeError("node is not registered")
+        record = await self.manager.get_node(self.node_id)
+        self.record = record
+        if record.membership_status != MembershipStatus.APPROVED:
+            raise ParentForbidden("node is not an approved group member")
+        group = await self.manager.get_group(self.group)
+        if group.allow_parent and record.id not in group.allow_parent and record.name not in group.allow_parent:
+            raise ParentForbidden("not allowed to submit jobs as parent")
+
+    async def _dispatch(
+        self,
+        job_id: str,
+        subtask_id: str,
+        spec: SubtaskSpec | Any,
+        *,
+        exclude_node_ids: set[str] | None = None,
+        target_node_id: str | None = None,
+    ) -> None:
+        if self._current_child is not None and self._current_child.job_id == job_id:
+            raise DispatchError("child cannot re-dispatch the same job")
+        blocked = set(exclude_node_ids or ())
+        blocked.add(self.node_id or "")
+        if target_node_id:
+            target = await self.manager.get_node(target_node_id)
+            if target.id in blocked or target.id == self.node_id:
+                raise DispatchError("refusing to dispatch to self or the source sibling")
+            if target.group != self.group:
+                raise DispatchError("refusing to dispatch across groups")
+            if target.membership_status != MembershipStatus.APPROVED:
+                raise DispatchError("target is not an approved member")
+            if target.status != NodeStatus.IDLE:
+                raise DispatchError("target is not idle")
+        else:
+            candidates = await self.manager.catalog(
+                CatalogQuery(
+                    group=self.group,
+                    idle_only=True,
+                    skills=list(spec.skills),
+                    tools=list(spec.tools),
+                    exclude_node_id=self.node_id,
+                )
             )
-        )
-        if not candidates:
-            raise DispatchError("no idle matching node in the same group")
-        target = candidates[0]
-        if target.id == self.node_id:
-            raise DispatchError("refusing to dispatch to self")
-        if target.group != self.group:
-            raise DispatchError("refusing to dispatch across groups")
+            candidates = [node for node in candidates if node.id not in blocked]
+            if not candidates:
+                raise DispatchError("no idle matching node in the same group")
+            target = candidates[0]
+            if target.id == self.node_id:
+                raise DispatchError("refusing to dispatch to self")
+            if target.group != self.group:
+                raise DispatchError("refusing to dispatch across groups")
         await self.jobs.update_subtask(
             job_id,
             subtask_id,
@@ -260,6 +349,13 @@ class NodeRuntime:
             except Exception:
                 log.exception("heartbeat failed")
             await asyncio.sleep(self.heartbeat_interval)
+
+
+def _find_subtask(job: JobMemory, subtask_id: str) -> SubtaskRecord | None:
+    for item in job.subtasks:
+        if item.id == subtask_id:
+            return item
+    return None
 
 
 def runtime_from_env(

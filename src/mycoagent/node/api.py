@@ -4,8 +4,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 
-from mycoagent.models import Envelope, JobMemory, JobSubmitRequest
-from mycoagent.node.runtime import BusyError, DispatchError, NodeRuntime
+from mycoagent.models import Envelope, ForwardRequest, JobMemory, JobSubmitRequest
+from mycoagent.node.runtime import BusyError, DispatchError, NodeRuntime, ParentForbidden
 from mycoagent.version import __version__
 
 
@@ -33,6 +33,8 @@ def create_node_app(runtime: NodeRuntime) -> FastAPI:
     async def submit_job(body: JobSubmitRequest) -> JobMemory:
         try:
             return await runtime.submit_job(body)
+        except ParentForbidden as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except DispatchError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -49,6 +51,18 @@ def create_node_app(runtime: NodeRuntime) -> FastAPI:
                 detail="job memory is not on this node (only the parent keeps it)",
             )
         return job
+
+    @app.post("/jobs/{job_id}/forward", response_model=JobMemory)
+    async def forward_subtask(job_id: str, body: ForwardRequest) -> JobMemory:
+        try:
+            return await runtime.forward_subtask(job_id, body)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="job memory is not on this node (only the parent keeps it)",
+            ) from exc
+        except DispatchError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/child")
     def child_work() -> dict[str, object]:

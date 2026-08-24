@@ -1,5 +1,13 @@
+# 專案／映像名稱固定為 mycoagent，不沿用資料夾 AgentGraph。
+# 映像只建一次（manager），節點共用 mycoagent:mvp。三個服務都寫 build 會讓 Bake 並行 tag 同一張映像而失敗。
+# 容器：mycoagent-manager-1、mycoagent-node-a-1、mycoagent-node-b-1
+# 主機埠：Manager 8080、alpha 9001、beta 9002。
+# 容器互連用 --advertise（http://node-a:9001），主機請打 http://127.0.0.1:9001。
+name: mycoagent
+
 services:
   manager:
+    image: mycoagent:mvp
     build: .
     command: ["python", "-m", "mycoagent", "manager", "--host", "0.0.0.0", "--port", "8080", "--bootstrap-group", "default"]
     ports:
@@ -11,7 +19,8 @@ services:
       retries: 20
 
   node-a:
-    build: .
+    image: mycoagent:mvp
+    pull_policy: never
     command:
       - python
       - -m
@@ -26,21 +35,27 @@ services:
       - --host
       - 0.0.0.0
       - --port
-      - "9000"
+      - "9001"
       - --advertise
-      - http://node-a:9000
+      - http://node-a:9001
       - --skills
       - coding
       - --tools
       - shell
     ports:
-      - "9001:9000"
+      - "9001:9001"
     depends_on:
       manager:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9001/health')"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
 
   node-b:
-    build: .
+    image: mycoagent:mvp
+    pull_policy: never
     command:
       - python
       - -m
@@ -55,15 +70,20 @@ services:
       - --host
       - 0.0.0.0
       - --port
-      - "9000"
+      - "9002"
       - --advertise
-      - http://node-b:9000
+      - http://node-b:9002
       - --skills
       - coding
       - --tools
       - shell
     ports:
-      - "9002:9000"
+      - "9002:9002"
     depends_on:
       manager:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9002/health')"]
+      interval: 2s
+      timeout: 2s
+      retries: 20

@@ -73,6 +73,22 @@ class JobStore:
             job.status = _roll_up(job)
             return job.model_copy(deep=True)
 
+    async def add_subtask(self, job_id: str, spec: SubtaskSpec) -> tuple[JobMemory, SubtaskRecord]:
+        record = SubtaskRecord(
+            id=str(uuid4()),
+            description=spec.description,
+            skills=spec.skills,
+            tools=spec.tools,
+            payload=spec.payload,
+        )
+        async with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise KeyError(job_id)
+            job.subtasks = [*job.subtasks, record]
+            job.status = _roll_up(job)
+            return job.model_copy(deep=True), record.model_copy(deep=True)
+
     async def complete_local(self, job_id: str, result: str) -> JobMemory:
         async with self._lock:
             job = self._jobs[job_id]

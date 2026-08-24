@@ -59,14 +59,41 @@ class ModelSpec(BaseModel):
     context_window: int | None = None
 
 
+class JoinMode(StrEnum):
+    AUTO = "auto"
+    MANUAL = "manual"
+
+
+class MembershipStatus(StrEnum):
+    APPROVED = "approved"
+    PENDING = "pending"
+    DENIED = "denied"
+
+
 class GroupCreate(BaseModel):
     name: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9._-]+$")
+    description: str = ""
+    join_mode: JoinMode = JoinMode.AUTO
+    allow_register: list[str] = Field(default_factory=list)
+    allow_parent: list[str] = Field(default_factory=list)
+
+
+class GroupPolicyUpdate(BaseModel):
+    description: str | None = None
+    join_mode: JoinMode | None = None
+    allow_register: list[str] | None = None
+    allow_parent: list[str] | None = None
 
 
 class GroupInfo(BaseModel):
     name: str
     created_at: datetime
+    description: str = ""
+    join_mode: JoinMode = JoinMode.AUTO
+    allow_register: list[str] = Field(default_factory=list)
+    allow_parent: list[str] = Field(default_factory=list)
     member_ids: list[str] = Field(default_factory=list)
+    pending_ids: list[str] = Field(default_factory=list)
 
 
 class NodeRegisterRequest(BaseModel):
@@ -102,6 +129,7 @@ class NodeRecord(BaseModel):
     status: NodeStatus
     last_seen: datetime
     created_at: datetime
+    membership_status: MembershipStatus = MembershipStatus.APPROVED
 
 
 class CatalogQuery(BaseModel):
@@ -122,6 +150,17 @@ class SubtaskSpec(BaseModel):
 class JobSubmitRequest(BaseModel):
     description: str
     subtasks: list[SubtaskSpec] = Field(default_factory=list)
+
+
+class ForwardRequest(BaseModel):
+    """Parent-only: add another assign_subtask on the same job, never sibling-to-sibling."""
+
+    description: str
+    skills: list[str] = Field(default_factory=list)
+    tools: list[str] = Field(default_factory=list)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    source_subtask_id: str | None = None
+    target_node_id: str | None = None
 
 
 class SubtaskRecord(BaseModel):

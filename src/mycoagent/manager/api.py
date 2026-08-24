@@ -2,12 +2,20 @@ from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException, Query
 
-from mycoagent.manager.store import GroupNotFound, ManagerStore, NodeNotFound
+from mycoagent.manager.store import (
+    GroupNotFound,
+    ManagerStore,
+    MembershipError,
+    NodeNotFound,
+    RegisterForbidden,
+)
 from mycoagent.models import (
     CatalogQuery,
     GroupCreate,
     GroupInfo,
+    GroupPolicyUpdate,
     HeartbeatRequest,
+    MembershipStatus,
     NodeRecord,
     NodeRegisterRequest,
 )
@@ -30,7 +38,13 @@ def create_app(store: ManagerStore, bootstrap_group: str | None = None) -> FastA
     @app.post("/groups", response_model=GroupInfo)
     def create_group(body: GroupCreate) -> GroupInfo:
         try:
-            return store.create_group(body.name)
+            return store.create_group(
+                body.name,
+                description=body.description,
+                join_mode=body.join_mode,
+                allow_register=body.allow_register,
+                allow_parent=body.allow_parent,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -45,6 +59,13 @@ def create_app(store: ManagerStore, bootstrap_group: str | None = None) -> FastA
         except GroupNotFound as exc:
             raise HTTPException(status_code=404, detail=f"group not found: {name}") from exc
 
+    @app.patch("/groups/{name}", response_model=GroupInfo)
+    def update_group(name: str, body: GroupPolicyUpdate) -> GroupInfo:
+        try:
+            return store.update_group(name, body)
+        except GroupNotFound as exc:
+            raise HTTPException(status_code=404, detail=f"group not found: {name}") from exc
+
     @app.delete("/groups/{name}")
     def delete_group(name: str) -> dict[str, str]:
         try:
@@ -52,6 +73,28 @@ def create_app(store: ManagerStore, bootstrap_group: str | None = None) -> FastA
         except GroupNotFound as exc:
             raise HTTPException(status_code=404, detail=f"group not found: {name}") from exc
         return {"deleted": name}
+
+    @app.post("/groups/{name}/approve/{node_id}", response_model=NodeRecord)
+    def approve_member(name: str, node_id: str) -> NodeRecord:
+        try:
+            return store.set_membership(name, node_id, MembershipStatus.APPROVED)
+        except GroupNotFound as exc:
+            raise HTTPException(status_code=404, detail=f"group not found: {name}") from exc
+        except NodeNotFound as exc:
+            raise HTTPException(status_code=404, detail=f"node not found: {node_id}") from exc
+        except MembershipError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/groups/{name}/deny/{node_id}", response_model=NodeRecord)
+    def deny_member(name: str, node_id: str) -> NodeRecord:
+        try:
+            return store.set_membership(name, node_id, MembershipStatus.DENIED)
+        except GroupNotFound as exc:
+            raise HTTPException(status_code=404, detail=f"group not found: {name}") from exc
+        except NodeNotFound as exc:
+            raise HTTPException(status_code=404, detail=f"node not found: {node_id}") from exc
+        except MembershipError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/nodes/register", response_model=NodeRecord)
     def register(body: NodeRegisterRequest) -> NodeRecord:
@@ -61,6 +104,8 @@ def create_app(store: ManagerStore, bootstrap_group: str | None = None) -> FastA
             raise HTTPException(
                 status_code=404, detail=f"group not found: {body.group}"
             ) from exc
+        except RegisterForbidden as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     @app.post("/nodes/{node_id}/heartbeat", response_model=NodeRecord)
     def heartbeat(node_id: str, body: HeartbeatRequest) -> NodeRecord:

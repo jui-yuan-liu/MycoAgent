@@ -89,6 +89,64 @@ def test_exclude_node_from_catalog(tmp_path):
     assert [n["name"] for n in catalog] == ["b"]
 
 
+def test_group_policy_defaults_and_update(tmp_path):
+    client = _client(tmp_path)
+    created = client.post(
+        "/groups",
+        json={
+            "name": "ops",
+            "description": "ops work",
+            "join_mode": "manual",
+            "allow_register": ["alpha"],
+            "allow_parent": ["alpha"],
+        },
+    )
+    assert created.status_code == 200
+    body = created.json()
+    assert body["description"] == "ops work"
+    assert body["join_mode"] == "manual"
+    assert body["allow_register"] == ["alpha"]
+    assert body["allow_parent"] == ["alpha"]
+    patched = client.patch("/groups/ops", json={"description": "updated", "join_mode": "auto"})
+    assert patched.status_code == 200
+    assert patched.json()["description"] == "updated"
+    assert patched.json()["join_mode"] == "auto"
+
+
+def test_unauthorized_name_cannot_register(tmp_path):
+    client = _client(tmp_path)
+    client.post("/groups", json={"name": "closed", "allow_register": ["allowed"]})
+    denied = client.post("/nodes/register", json=_register(name="intruder", group="closed").model_dump(mode="json"))
+    assert denied.status_code == 403
+    assert "not allowed to register" in denied.json()["detail"]
+    ok = client.post("/nodes/register", json=_register(name="allowed", group="closed").model_dump(mode="json"))
+    assert ok.status_code == 200
+    assert ok.json()["membership_status"] == "approved"
+
+
+def test_unapproved_node_cannot_join_catalog(tmp_path):
+    client = _client(tmp_path)
+    client.post("/groups", json={"name": "locked", "join_mode": "manual"})
+    pending = client.post("/nodes/register", json=_register(name="waiter", group="locked").model_dump(mode="json"))
+    assert pending.status_code == 200
+    node = pending.json()
+    assert node["membership_status"] == "pending"
+    group = client.get("/groups/locked").json()
+    assert group["member_ids"] == []
+    assert group["pending_ids"] == [node["id"]]
+    catalog = client.get("/catalog", params={"group": "locked", "idle_only": True}).json()
+    assert catalog == []
+    approved = client.post(f"/groups/locked/approve/{node['id']}")
+    assert approved.status_code == 200
+    assert approved.json()["membership_status"] == "approved"
+    catalog = client.get("/catalog", params={"group": "locked", "idle_only": True}).json()
+    assert [n["id"] for n in catalog] == [node["id"]]
+    denied = client.post(f"/groups/locked/deny/{node['id']}")
+    assert denied.json()["membership_status"] == "denied"
+    catalog = client.get("/catalog", params={"group": "locked", "idle_only": True}).json()
+    assert catalog == []
+
+
 def test_heartbeat_timeout_marks_offline(tmp_path):
     store = ManagerStore(str(tmp_path / "m.db"), heartbeat_timeout_seconds=1)
     client = TestClient(create_app(store, bootstrap_group="default"))

@@ -9,10 +9,11 @@ from mycoagent.models import (
     CatalogQuery,
     GroupCreate,
     GroupInfo,
+    GroupPolicyUpdate,
     HeartbeatRequest,
+    JoinMode,
     NodeRecord,
     NodeRegisterRequest,
-    NodeStatus,
     SubtaskResultMessage,
 )
 
@@ -30,10 +31,47 @@ class ManagerClient:
         response.raise_for_status()
         return response.json()
 
-    async def create_group(self, name: str) -> GroupInfo:
-        response = await self._http.post("/groups", json=GroupCreate(name=name).model_dump())
+    async def create_group(
+        self,
+        name: str,
+        *,
+        description: str = "",
+        join_mode: JoinMode | str = JoinMode.AUTO,
+        allow_register: list[str] | None = None,
+        allow_parent: list[str] | None = None,
+    ) -> GroupInfo:
+        body = GroupCreate(
+            name=name,
+            description=description,
+            join_mode=JoinMode(join_mode),
+            allow_register=allow_register or [],
+            allow_parent=allow_parent or [],
+        )
+        response = await self._http.post("/groups", json=body.model_dump(mode="json"))
         response.raise_for_status()
         return GroupInfo.model_validate(response.json())
+
+    async def update_group(self, name: str, patch: GroupPolicyUpdate) -> GroupInfo:
+        response = await self._http.patch(
+            f"/groups/{name}", json=patch.model_dump(mode="json", exclude_none=True)
+        )
+        response.raise_for_status()
+        return GroupInfo.model_validate(response.json())
+
+    async def approve(self, group: str, node_id: str) -> NodeRecord:
+        response = await self._http.post(f"/groups/{group}/approve/{node_id}")
+        response.raise_for_status()
+        return NodeRecord.model_validate(response.json())
+
+    async def deny(self, group: str, node_id: str) -> NodeRecord:
+        response = await self._http.post(f"/groups/{group}/deny/{node_id}")
+        response.raise_for_status()
+        return NodeRecord.model_validate(response.json())
+
+    async def get_node(self, node_id: str) -> NodeRecord:
+        response = await self._http.get(f"/nodes/{node_id}")
+        response.raise_for_status()
+        return NodeRecord.model_validate(response.json())
 
     async def list_groups(self) -> list[GroupInfo]:
         response = await self._http.get("/groups")
