@@ -174,6 +174,7 @@ class SubtaskRecord(BaseModel):
     status: SubtaskStatus = SubtaskStatus.PENDING
     result: str | None = None
     error: str | None = None
+    artifact_ids: list[str] = Field(default_factory=list)
 
 
 class JobMemory(BaseModel):
@@ -207,6 +208,7 @@ class SubtaskResultMessage(BaseModel):
     status: SubtaskStatus
     result: str | None = None
     error: str | None = None
+    artifact_ids: list[str] = Field(default_factory=list)
 
 
 class ChildWork(BaseModel):
@@ -218,6 +220,7 @@ class ChildWork(BaseModel):
     payload: dict[str, Any]
     status: SubtaskStatus
     result: str | None = None
+    artifact_ids: list[str] = Field(default_factory=list)
 
 
 class Envelope(BaseModel):

@@ -39,6 +39,7 @@ def test_parent_dispatches_only_to_same_group_other_node(tmp_path):
                 current = _wait_job(alpha_url, job["job_id"])
                 assert current["status"] == "completed"
                 assert current["subtasks"][0]["result"].startswith("done:child work")
+                assert current["subtasks"][0]["artifact_ids"] == []
                 missing = httpx.get(f"{beta_url}/jobs/{job['job_id']}", timeout=5)
                 assert missing.status_code == 404
                 child = httpx.get(f"{beta_url}/child", timeout=5).json()

@@ -7,13 +7,19 @@ import httpx
 import typer
 import uvicorn
 
+from mycoagent.artifacts import artifact_store_from_env
 from mycoagent.manager.api import create_app
-from mycoagent.manager.store import ManagerStore
+from mycoagent.manager.store import open_store
 from mycoagent.models import ForwardRequest, JobSubmitRequest, SubtaskSpec
-from mycoagent.node.api import create_node_app
-from mycoagent.node.runtime import NodeRuntime
+from mycoagent.node.api import create_host_app, create_node_app
+from mycoagent.node.executor import ChildAgentExecutor, EchoExecutor
+from mycoagent.node.llm import llm_from_env
+from mycoagent.node.opencode import OpenCodeExecutor
+from mycoagent.node.planner import TaskPlanner
+from mycoagent.node.runtime import AgentSpec, HostRuntime, NodeRuntime
+from mycoagent.node.specs import parse_csv, parse_models
 
-app = typer.Typer(no_args_is_help=True, help="MycoAgent: groups, catalog, nodes, policies")
+app = typer.Typer(no_args_is_help=True, help="MycoAgent: groups, catalog, host agents, policies")
 ctl = typer.Typer(no_args_is_help=True, help="Admin commands against Cluster Manager")
 app.add_typer(ctl, name="ctl")
 
@@ -26,48 +32,165 @@ def manager(
     bootstrap_group: Optional[str] = "default",
     heartbeat_timeout: int = 15,
 ) -> None:
-    """Run Cluster Manager (groups + resource catalog)."""
-    store = ManagerStore(db, heartbeat_timeout_seconds=heartbeat_timeout)
+    """Run Cluster Manager (groups + resource catalog). --db is a SQLite path or postgres:// DSN."""
+    store = open_store(db, heartbeat_timeout_seconds=heartbeat_timeout)
     uvicorn.run(create_app(store, bootstrap_group=bootstrap_group), host=host, port=port)
 
 
 @app.command()
 def node(
-    manager_url: str = typer.Option(..., "--manager", help="Cluster Manager base URL"),
+    manager_url: Optional[str] = typer.Option(
+        None,
+        "--manager",
+        envvar="MYCOAGENT_MANAGER",
+        help="Cluster Manager base URL (or MYCOAGENT_MANAGER)",
+    ),
     group: str = typer.Option(..., "--group"),
-    name: str = typer.Option(..., "--name"),
+    name: Optional[str] = typer.Option(None, "--name", help="Single-agent shorthand"),
     host: str = "0.0.0.0",
     port: int = 9000,
     advertise: Optional[str] = typer.Option(
-        None, "--advertise", help="Mailbox URL other nodes should call, default http://127.0.0.1:PORT"
+        None, "--advertise", help="Host base URL others should call, default http://127.0.0.1:PORT"
     ),
     skills: Optional[str] = None,
     tools: Optional[str] = None,
     models: Optional[str] = None,
+    agent: Optional[list[str]] = typer.Option(
+        None,
+        "--agent",
+        help="Repeatable. name=alpha,skills=coding,tools=shell,models=gpt-4:api",
+    ),
+    executor_name: str = typer.Option(
+        "auto",
+        "--executor",
+        help="auto (echo without LLM, built-in agent loop with LLM), echo, agent, or opencode",
+    ),
+    max_steps: int = typer.Option(12, "--max-steps"),
+    opencode_bin: Optional[str] = typer.Option(
+        None,
+        "--opencode-bin",
+        envvar="MYCOAGENT_OPENCODE_BIN",
+        help="opencode binary when --executor opencode (default: opencode)",
+    ),
+    opencode_timeout: float = typer.Option(120.0, "--opencode-timeout"),
     heartbeat_interval: float = 5.0,
 ) -> None:
-    """Run a node: register, heartbeat, mailbox, parent job memory."""
-    mailbox_url = (advertise or f"http://127.0.0.1:{port}").rstrip("/")
-    from mycoagent.node.specs import parse_csv, parse_models
-
-    runtime = NodeRuntime(
-        manager_url=manager_url,
-        name=name,
-        group=group,
-        mailbox_url=mailbox_url,
-        skills=parse_csv(skills),
-        tools_declared=parse_csv(tools),
-        tools_available=parse_csv(tools),
-        models=parse_models(models),
-        heartbeat_interval=heartbeat_interval,
+    """Run a Host: one process, one or more agents, each with mailbox and heartbeat."""
+    if not manager_url:
+        raise typer.BadParameter("provide --manager or set MYCOAGENT_MANAGER")
+    mailbox_base = (advertise or f"http://127.0.0.1:{port}").rstrip("/")
+    worker, planner = _executor_and_planner(
+        executor_name,
+        max_steps,
+        opencode_bin=opencode_bin,
+        opencode_timeout=opencode_timeout,
     )
-    uvicorn.run(create_node_app(runtime), host=host, port=port)
+    artifacts = artifact_store_from_env()
+    specs = _agent_specs(agent, name=name, skills=skills, tools=tools, models=models)
+    if len(specs) == 1 and specs[0].root_mailbox:
+        spec = specs[0]
+        runtime = NodeRuntime(
+            manager_url=manager_url,
+            name=spec.name,
+            group=group,
+            mailbox_url=mailbox_base,
+            skills=spec.skills,
+            tools_declared=spec.tools,
+            tools_available=spec.tools,
+            models=spec.models,
+            heartbeat_interval=heartbeat_interval,
+            artifact_store=artifacts,
+            executor=worker,
+            planner=planner,
+        )
+        uvicorn.run(create_node_app(runtime), host=host, port=port)
+        return
+    host_runtime = HostRuntime(
+        manager_url=manager_url,
+        group=group,
+        advertise=mailbox_base,
+        specs=specs,
+        heartbeat_interval=heartbeat_interval,
+        artifact_store=artifacts,
+        executor=worker,
+        planner=planner,
+    )
+    uvicorn.run(create_host_app(host_runtime), host=host, port=port)
 
 
 def _csv(value: Optional[str]) -> list[str]:
     if not value:
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _executor_and_planner(
+    executor_name: str,
+    max_steps: int,
+    *,
+    opencode_bin: str | None = None,
+    opencode_timeout: float = 120.0,
+):
+    llm = llm_from_env()
+    mode = executor_name.strip().lower()
+    if mode not in {"auto", "echo", "agent", "opencode"}:
+        raise typer.BadParameter("--executor must be auto, echo, agent, or opencode")
+    planner = TaskPlanner(llm) if llm is not None else None
+    if mode == "opencode":
+        return OpenCodeExecutor(binary=opencode_bin, timeout=opencode_timeout), planner
+    if mode == "echo" or (mode == "auto" and llm is None):
+        return EchoExecutor(), planner
+    if llm is None:
+        raise typer.BadParameter("agent executor requires MYCOAGENT_LLM_BASE_URL")
+    return ChildAgentExecutor(llm, max_steps=max_steps), planner
+
+
+def _parse_agent_option(raw: str) -> AgentSpec:
+    fields: dict[str, str] = {}
+    for item in raw.split(","):
+        piece = item.strip()
+        if not piece:
+            continue
+        if "=" not in piece:
+            raise typer.BadParameter(f"agent field must be key=value: {piece}")
+        key, value = piece.split("=", 1)
+        fields[key.strip()] = value.strip()
+    name = fields.get("name")
+    if not name:
+        raise typer.BadParameter("--agent needs name=...")
+    return AgentSpec(
+        name=name,
+        skills=parse_csv(fields.get("skills")),
+        tools=parse_csv(fields.get("tools")),
+        models=parse_models(fields.get("models")),
+        root_mailbox=False,
+    )
+
+
+def _agent_specs(
+    agents: list[str] | None,
+    *,
+    name: str | None,
+    skills: str | None,
+    tools: str | None,
+    models: str | None,
+) -> list[AgentSpec]:
+    if agents:
+        specs = [_parse_agent_option(item) for item in agents]
+        if len(specs) == 1:
+            specs[0].root_mailbox = True
+        return specs
+    if not name:
+        raise typer.BadParameter("provide --name or at least one --agent")
+    return [
+        AgentSpec(
+            name=name,
+            skills=parse_csv(skills),
+            tools=parse_csv(tools),
+            models=parse_models(models),
+            root_mailbox=True,
+        )
+    ]
 
 
 @ctl.command("groups-create")
@@ -175,7 +298,9 @@ def submit(
     node_url: str = typer.Option(..., "--node"),
     description: str = typer.Option(...),
     subtask: Optional[list[str]] = typer.Option(
-        None, "--subtask", help="Repeatable. Optional skills after | e.g. 'write tests|coding'"
+        None,
+        "--subtask",
+        help="Repeatable. Optional skills after | e.g. 'write tests|coding'. Omit to let the parent LLM split using the catalog.",
     ),
 ) -> None:
     specs: list[SubtaskSpec] = []

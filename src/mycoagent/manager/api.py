@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException, Query
 
 from mycoagent.manager.store import (
     GroupNotFound,
-    ManagerStore,
+    ManagerStoreProtocol,
     MembershipError,
     NodeNotFound,
     RegisterForbidden,
@@ -22,7 +22,7 @@ from mycoagent.models import (
 from mycoagent.version import __version__
 
 
-def create_app(store: ManagerStore, bootstrap_group: str | None = None) -> FastAPI:
+def create_app(store: ManagerStoreProtocol, bootstrap_group: str | None = None) -> FastAPI:
     if bootstrap_group:
         try:
             store.create_group(bootstrap_group)
@@ -97,6 +97,7 @@ def create_app(store: ManagerStore, bootstrap_group: str | None = None) -> FastA
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/nodes/register", response_model=NodeRecord)
+    @app.post("/agents/register", response_model=NodeRecord, include_in_schema=False)
     def register(body: NodeRegisterRequest) -> NodeRecord:
         try:
             return store.register_node(body)
@@ -108,6 +109,7 @@ def create_app(store: ManagerStore, bootstrap_group: str | None = None) -> FastA
             raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     @app.post("/nodes/{node_id}/heartbeat", response_model=NodeRecord)
+    @app.post("/agents/{node_id}/heartbeat", response_model=NodeRecord, include_in_schema=False)
     def heartbeat(node_id: str, body: HeartbeatRequest) -> NodeRecord:
         try:
             return store.heartbeat(node_id, body)
@@ -115,6 +117,7 @@ def create_app(store: ManagerStore, bootstrap_group: str | None = None) -> FastA
             raise HTTPException(status_code=404, detail=f"node not found: {node_id}") from exc
 
     @app.get("/nodes/{node_id}", response_model=NodeRecord)
+    @app.get("/agents/{node_id}", response_model=NodeRecord, include_in_schema=False)
     def get_node(node_id: str) -> NodeRecord:
         try:
             return store.get_node(node_id)

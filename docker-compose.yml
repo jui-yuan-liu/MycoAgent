@@ -1,15 +1,27 @@
 # 專案／映像名稱固定為 mycoagent，不沿用資料夾 AgentGraph。
 # 映像只建一次（manager），節點共用 mycoagent:mvp。三個服務都寫 build 會讓 Bake 並行 tag 同一張映像而失敗。
-# 容器：mycoagent-manager-1、mycoagent-node-a-1、mycoagent-node-b-1
-# 主機埠：Manager 8080、alpha 9001、beta 9002。
+# 容器：mycoagent-manager-1、mycoagent-node-a-1、mycoagent-node-b-1、mycoagent-minio-1
+# 主機埠：Manager 8080、alpha 9001、beta 9002、MinIO API 9090、MinIO console 9091。
 # 容器互連用 --advertise（http://node-a:9001），主機請打 http://127.0.0.1:9001。
 name: mycoagent
 
 services:
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9090:9000"
+      - "9091:9001"
+
   manager:
     image: mycoagent:mvp
     build: .
     command: ["python", "-m", "mycoagent", "manager", "--host", "0.0.0.0", "--port", "8080", "--bootstrap-group", "default"]
+    environment:
+      MYCOAGENT_MANAGER: http://manager:8080
     ports:
       - "8080:8080"
     healthcheck:
@@ -21,6 +33,12 @@ services:
   node-a:
     image: mycoagent:mvp
     pull_policy: never
+    environment:
+      MYCOAGENT_MANAGER: http://manager:8080
+      MYCOAGENT_S3_ENDPOINT: http://minio:9000
+      MYCOAGENT_S3_ACCESS_KEY: minioadmin
+      MYCOAGENT_S3_SECRET_KEY: minioadmin
+      MYCOAGENT_S3_BUCKET: mycoagent
     command:
       - python
       - -m
@@ -42,11 +60,15 @@ services:
       - coding
       - --tools
       - shell
+      - --executor
+      - echo
     ports:
       - "9001:9001"
     depends_on:
       manager:
         condition: service_healthy
+      minio:
+        condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9001/health')"]
       interval: 2s
@@ -56,6 +78,12 @@ services:
   node-b:
     image: mycoagent:mvp
     pull_policy: never
+    environment:
+      MYCOAGENT_MANAGER: http://manager:8080
+      MYCOAGENT_S3_ENDPOINT: http://minio:9000
+      MYCOAGENT_S3_ACCESS_KEY: minioadmin
+      MYCOAGENT_S3_SECRET_KEY: minioadmin
+      MYCOAGENT_S3_BUCKET: mycoagent
     command:
       - python
       - -m
@@ -77,11 +105,15 @@ services:
       - coding
       - --tools
       - shell
+      - --executor
+      - echo
     ports:
       - "9002:9002"
     depends_on:
       manager:
         condition: service_healthy
+      minio:
+        condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9002/health')"]
       interval: 2s

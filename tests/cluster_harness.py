@@ -5,16 +5,19 @@ from __future__ import annotations
 import socket
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 
 import httpx
 import uvicorn
 
+from mycoagent.artifacts import ArtifactStore
 from mycoagent.manager.api import create_app
 from mycoagent.manager.store import ManagerStore
-from mycoagent.node.api import create_node_app
-from mycoagent.node.runtime import NodeRuntime
+from mycoagent.node.api import create_host_app, create_node_app
+from mycoagent.node.executor import Executor
+from mycoagent.node.planner import TaskPlanner
+from mycoagent.node.runtime import AgentSpec, HostRuntime, NodeRuntime
 
 
 def free_port() -> int:
@@ -63,6 +66,10 @@ def node_server(
     skills: list[str] | None = None,
     tools: list[str] | None = None,
     heartbeat_interval: float = 0.4,
+    *,
+    executor: Executor | None = None,
+    artifact_store: ArtifactStore | None = None,
+    planner: TaskPlanner | None = None,
 ) -> Iterator[tuple[str, NodeRuntime]]:
     port = free_port()
     mailbox = f"http://127.0.0.1:{port}"
@@ -75,7 +82,59 @@ def node_server(
         tools_declared=tools or ["shell"],
         tools_available=tools or ["shell"],
         heartbeat_interval=heartbeat_interval,
+        executor=executor,
+        artifact_store=artifact_store,
+        planner=planner,
     )
     app = create_node_app(runtime)
     with run_app(app, port=port) as url:
         yield url, runtime
+
+
+@contextmanager
+def host_server(
+    manager_url: str,
+    group: str,
+    agents: Sequence[dict[str, object]],
+    heartbeat_interval: float = 0.4,
+    *,
+    executor: Executor | None = None,
+    artifact_store: ArtifactStore | None = None,
+    planner: TaskPlanner | None = None,
+) -> Iterator[tuple[str, HostRuntime]]:
+    port = free_port()
+    advertise = f"http://127.0.0.1:{port}"
+    specs = [
+        AgentSpec(
+            name=str(item["name"]),
+            skills=list(item.get("skills") or ["coding"]),  # type: ignore[arg-type]
+            tools=list(item.get("tools") or ["shell"]),  # type: ignore[arg-type]
+            root_mailbox=len(agents) == 1,
+        )
+        for item in agents
+    ]
+    host = HostRuntime(
+        manager_url=manager_url,
+        group=group,
+        advertise=advertise,
+        specs=specs,
+        heartbeat_interval=heartbeat_interval,
+        artifact_store=artifact_store,
+        executor=executor,
+        planner=planner,
+    )
+    app = create_host_app(host)
+    with run_app(app, port=port) as url:
+        yield url, host
+
+
+def wait_job(node_url: str, job_id: str, timeout: float = 5.0) -> dict:
+    deadline = time.time() + timeout
+    current: dict | None = None
+    while time.time() < deadline:
+        current = httpx.get(f"{node_url}/jobs/{job_id}", timeout=5).json()
+        if current["status"] in {"completed", "failed"}:
+            return current
+        time.sleep(0.1)
+    assert current is not None
+    return current
