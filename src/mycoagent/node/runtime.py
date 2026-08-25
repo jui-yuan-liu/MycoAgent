@@ -23,6 +23,7 @@ from mycoagent.models import (
     NodeRecord,
     NodeRegisterRequest,
     NodeStatus,
+    AgentConfigureRequest,
     SubtaskRecord,
     SubtaskResultMessage,
     SubtaskSpec,
@@ -137,6 +138,10 @@ class AgentRuntime:
         job_db: str | None = None,
         mailbox_queue_size: int = DEFAULT_MAILBOX_QUEUE,
         dispatch_timeout: float = 10.0,
+        llm_base_url: str | None = None,
+        llm_api_key: str | None = None,
+        llm_model: str | None = None,
+        max_steps: int = 12,
     ) -> None:
         self.manager_url = manager_url
         self.name = name
@@ -169,6 +174,10 @@ class AgentRuntime:
         self.last_workspace_path: str | None = None
         self._rr_index = 0
         self.dispatch_timeout = dispatch_timeout
+        self.llm_base_url = llm_base_url
+        self.llm_api_key = llm_api_key
+        self.llm_model = llm_model
+        self._max_steps = max_steps
 
     @property
     def agent_id(self) -> str | None:
@@ -184,7 +193,7 @@ class AgentRuntime:
             return NodeStatus.BUSY
         return NodeStatus.IDLE
 
-    async def start(self) -> NodeRecord:
+    async def reregister(self) -> NodeRecord:
         req = NodeRegisterRequest(
             name=self.name,
             group=self.group,
@@ -199,9 +208,50 @@ class AgentRuntime:
         )
         self.record = await self.manager.register(req)
         self.node_id = self.record.id
-        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         log.info("registered agent %s in group %s", self.node_id, self.group)
         return self.record
+
+    async def start(self) -> NodeRecord:
+        record = await self.reregister()
+        if self._heartbeat_task is None or self._heartbeat_task.done():
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        return record
+
+    async def apply_config(self, body: AgentConfigureRequest, *, max_steps: int | None = None) -> NodeRecord:
+        """Update llm/skills/tools/models in-process and register the same agent id."""
+        from mycoagent.node.executor import EchoExecutor
+
+        steps = max_steps if max_steps is not None else self._max_steps
+        if body.name:
+            self.name = body.name
+        if body.skills is not None:
+            self.skills = list(body.skills)
+        if body.tools is not None:
+            self.tools_declared = list(body.tools)
+            self.tools_available = list(body.tools)
+        if body.models is not None:
+            self.models = parse_models(",".join(body.models)) if body.models else []
+        if body.llm_url is not None:
+            self.llm_base_url = body.llm_url.strip() or None
+        if body.llm_key is not None:
+            self.llm_api_key = body.llm_key.strip() or None
+        if body.llm_model is not None:
+            self.llm_model = body.llm_model.strip() or None
+        mode = (body.executor or "auto").strip().lower()
+        if mode == "echo" or not self.llm_base_url:
+            self.executor = EchoExecutor()
+            self.planner = None
+        else:
+            spec = AgentSpec(
+                name=self.name,
+                llm_base_url=self.llm_base_url,
+                llm_api_key=self.llm_api_key,
+                llm_model=self.llm_model,
+            )
+            attach_spec_llms([spec], max_steps=steps)
+            self.executor = spec.executor or EchoExecutor()
+            self.planner = spec.planner
+        return await self.reregister()
 
     async def close(self) -> None:
         self._closed = True
@@ -611,6 +661,9 @@ class HostRuntime:
                 planner=spec.planner or planner,
                 job_db=_job_db_path(job_base, agent_id, shared=shared_jobs),
                 mailbox_queue_size=mailbox_queue_size,
+                llm_base_url=spec.llm_base_url,
+                llm_api_key=spec.llm_api_key,
+                llm_model=spec.llm_model,
             )
             self._ordered.append(agent)
 

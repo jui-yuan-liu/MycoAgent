@@ -8,6 +8,8 @@ from uuid import uuid4
 
 import httpx
 
+from mycoagent.node.providers import normalize_openai_base_url
+
 
 @dataclass
 class ToolCall:
@@ -39,7 +41,7 @@ class OpenAICompatClient:
         model: str,
         timeout: float = 60.0,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        self.base_url = normalize_openai_base_url(base_url)
         self.api_key = api_key
         self.model = model
         self._http = httpx.AsyncClient(timeout=timeout)

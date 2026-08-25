@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, FastAPI, HTTPException
 
-from mycoagent.models import Envelope, ForwardRequest, JobMemory, JobSubmitRequest
+from mycoagent.models import AgentConfigureRequest, Envelope, ForwardRequest, JobMemory, JobSubmitRequest
 from mycoagent.node.runtime import (
     AgentRuntime,
     BusyError,
@@ -75,6 +75,11 @@ def _agent_router(get_agent: Callable[[], AgentRuntime]) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @router.post("/configure")
+    async def configure(body: AgentConfigureRequest) -> dict[str, object]:
+        record = await get_agent().apply_config(body)
+        return _configure_result(record)
+
     return router
 
 
@@ -136,6 +141,11 @@ def _scoped_agent_router(fetch: Callable[[str], AgentRuntime]) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @router.post("/configure")
+    async def configure(agent_id: str, body: AgentConfigureRequest) -> dict[str, object]:
+        record = await fetch(agent_id).apply_config(body)
+        return _configure_result(record)
+
     return router
 
 
@@ -145,6 +155,17 @@ def _agent_summary(agent: AgentRuntime) -> dict[str, object]:
         "name": agent.name,
         "status": agent.status.value,
         "mailbox_url": agent.mailbox_url,
+    }
+
+
+def _configure_result(record) -> dict[str, object]:
+    return {
+        "id": record.id,
+        "name": record.name,
+        "skills": record.skills,
+        "tools_declared": record.tools_declared,
+        "models": [item.model_dump(mode="json") for item in record.models],
+        "status": record.status.value,
     }
 
 

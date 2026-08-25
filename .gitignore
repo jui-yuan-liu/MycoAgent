@@ -11,3 +11,6 @@ build/
 *.db-journal
 .DS_Store
 .env
+.mycoagent/*
+!.mycoagent/agents.example.yaml
+!.mycoagent/agents.omlx.example.yaml

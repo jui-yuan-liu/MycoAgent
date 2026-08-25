@@ -29,9 +29,9 @@ def test_attach_spec_llms_uses_separate_clients():
     assert isinstance(llm_a, OpenAICompatClient)
     assert isinstance(llm_b, OpenAICompatClient)
     assert llm_a is not llm_b
-    assert llm_a.base_url == "http://127.0.0.1:11434"
+    assert llm_a.base_url == "http://127.0.0.1:11434/v1"
     assert llm_a.model == "llama3"
-    assert llm_b.base_url == "http://127.0.0.1:4000"
+    assert llm_b.base_url == "http://127.0.0.1:4000/v1"
     assert llm_b.api_key == "k"
     assert specs[2].executor is None
     assert specs[0].planner is not None

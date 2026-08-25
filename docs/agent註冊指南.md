@@ -99,6 +99,18 @@ python -m mycoagent node --manager http://127.0.0.1:8080 --group default \
   --skills coding --tools shell --executor agent
 ```
 
-Docker 裡「這台 Host 自己的 LLM」：該 service 設自己的 `MYCOAGENT_LLM_*`（一容器一組仍最單純）。
+本機 **oMLX**（預設 `http://127.0.0.1:8000/v1`，須先自己 `omlx start` 或開選單列 App）：
+
+```bash
+export MYCOAGENT_LLM_BASE_URL=http://127.0.0.1:8000/v1
+export MYCOAGENT_LLM_MODEL=你的模型目錄名   # 或 curl http://127.0.0.1:8000/v1/models
+python -m mycoagent node --manager http://127.0.0.1:8080 --group default \
+  --name gamma --port 9003 --advertise http://127.0.0.1:9003 \
+  --skills coding --tools shell --executor agent
+```
+
+Docker 裡連 Mac 上的 oMLX：`python -m mycoagent init --provider omlx`（容器內 URL 是 `http://host.docker.internal:8000/v1`）。oMLX 若開了 `--api-key`，init 再加 `--llm-key`。
+
+Docker 裡「這台 Host 自己的 LLM」：該 service 設自己的 `MYCOAGENT_LLM_*`（一容器一組仍最單純），或跑 `python -m mycoagent init` 寫入 `/config/agents.yaml` 並 `POST /configure`。容器內不要用 `127.0.0.1` 指主機上的 oMLX／Ollama。
 
 父切分也走同一套 LLM client（有連線才會自動切 subtasks）。信箱協定不變。

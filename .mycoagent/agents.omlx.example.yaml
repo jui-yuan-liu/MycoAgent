@@ -1,0 +1,21 @@
+# Copy to agents.yaml or run:
+#   python -m mycoagent init --provider omlx
+# oMLX must already be running on the Mac (menu bar app or `omlx start`).
+# From Docker, use host.docker.internal — never 127.0.0.1 inside the container.
+agents:
+  - name: alpha
+    skills: [coding]
+    tools: [shell]
+    executor: auto
+    llm_url: http://host.docker.internal:8000/v1
+    llm_model: Qwen3-Coder-8bit
+    llm_key: ""
+    models: ["Qwen3-Coder-8bit:local:8192"]
+  - name: beta
+    skills: [coding]
+    tools: [shell]
+    executor: auto
+    llm_url: http://host.docker.internal:8000/v1
+    llm_model: Qwen3-Coder-8bit
+    llm_key: ""
+    models: ["Qwen3-Coder-8bit:local:8192"]

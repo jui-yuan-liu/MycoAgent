@@ -239,5 +239,18 @@ class Envelope(BaseModel):
     body: dict[str, Any]
 
 
+class AgentConfigureRequest(BaseModel):
+    """Live-update one Host agent (LLM / skills / tools / models) then re-register."""
+
+    name: str | None = None
+    skills: list[str] | None = None
+    tools: list[str] | None = None
+    models: list[str] | None = None
+    llm_url: str | None = None
+    llm_model: str | None = None
+    llm_key: str | None = None
+    executor: str | None = None
+
+
 class ErrorBody(BaseModel):
     detail: str

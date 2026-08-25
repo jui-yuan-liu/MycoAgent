@@ -1,0 +1,19 @@
+# Copy to agents.yaml or run `python -m mycoagent init`.
+# This example is safe to commit; agents.yaml and *.id are gitignored.
+agents:
+  - name: alpha
+    skills: [coding]
+    tools: [shell]
+    executor: auto
+    llm_url: http://host.docker.internal:11434/v1
+    llm_model: llama3
+    llm_key: ""
+    models: ["llama3:local:8192"]
+  - name: beta
+    skills: [coding]
+    tools: [shell]
+    executor: auto
+    llm_url: http://host.docker.internal:11434/v1
+    llm_model: llama3
+    llm_key: ""
+    models: ["llama3:local:8192"]

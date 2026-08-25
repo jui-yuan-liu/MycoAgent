@@ -2,7 +2,7 @@
 
 群組、資源目錄、Host 上的多個 agent 信箱。Cluster Manager 只管通訊錄與群組政策；任務記憶只活在發起任務的父 agent。子 agent 用**可插拔執行器**做事（預設內建 tool loop，可改 Echo 或本機 OpenCode），把產物上傳 MinIO／S3 後清掉工作區，只回報摘要與 artifact id。兄弟不互連。信箱是自有 JSON，不是 A2A。
 
-逐步從零跑起來：請看 **[文件目錄](docs/README.md)**（[快速使用指南](docs/快速使用指南.md)、[Agent 註冊指南](docs/agent註冊指南.md)、[系統架構](docs/系統架構.md)、[工作流程](docs/工作流程.md)、[未來開發計畫](docs/未來開發計畫.md)）。完整逐步操作仍在 **[入門啟用指南](docs/入門啟用指南.md)**。
+逐步從零跑起來：請看 **[文件目錄](docs/README.md)**（[快速使用指南](docs/快速使用指南.md)、[Agent 註冊指南](docs/agent註冊指南.md)、[系統架構](docs/系統架構.md)、[工作流程](docs/工作流程.md)、[未來開發計畫](docs/未來開發計畫.md)）。完整逐步操作仍在 **[入門啟用指南](docs/入門啟用指南.md)**。Docker 一鍵路徑：`docker compose up --build -d` 後 `docker compose exec -it node-a python -m mycoagent init`（詳見快速使用指南）。
 
 ## 角色
 
@@ -87,10 +87,11 @@ pytest
 ## Docker
 
 ```bash
-docker compose up --build
+docker compose up --build -d
+docker compose exec -it node-a python -m mycoagent init
 ```
 
-Compose 專案與映像名稱是 `mycoagent`（映像標籤 `mycoagent:mvp`）。容器會是 `mycoagent-manager-1`、`mycoagent-node-a-1`、`mycoagent-node-b-1`、`mycoagent-minio-1`。兩個 node 仍是兩個 Host、各一個 agent，demo 指令不變。MinIO API 在主機 `http://127.0.0.1:9090`，console `http://127.0.0.1:9091`（帳密 `minioadmin`／`minioadmin`）。
+Compose 專案與映像名稱是 `mycoagent`（映像標籤 `mycoagent:mvp`）。容器會是 `mycoagent-manager-1`、`mycoagent-node-a-1`、`mycoagent-node-b-1`、`mycoagent-minio-1`。兩個 node 仍是兩個 Host、各一個 agent。沒設過 LLM 時先以 Echo 起來；`init --provider omlx` 可對接本機 oMLX（須先在 Mac 上啟動）。容器內連本機 LLM 用 `host.docker.internal`（見 [快速使用指南](docs/快速使用指南.md)）。MinIO API 在主機 `http://127.0.0.1:9090`，console `http://127.0.0.1:9091`（帳密 `minioadmin`／`minioadmin`）。
 
 若本機還留著舊的 `agentgraph-*` 容器／映像：
 

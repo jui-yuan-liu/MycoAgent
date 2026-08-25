@@ -25,6 +25,30 @@ from mycoagent.node.runtime import (
     attach_spec_llms,
 )
 from mycoagent.node.capabilities import load_capabilities, load_names, merge_names
+from mycoagent.node.local_config import (
+    LocalAgentConfig,
+    LocalAgentsFile,
+    apply_config_to_hosts,
+    apply_flags,
+    default_agents,
+    default_config_path,
+    default_host_urls,
+    is_configured,
+    load_local_config,
+    probe_llm,
+    save_local_config,
+    select_agent,
+    spec_from_local,
+    summarize,
+)
+from mycoagent.node.providers import (
+    PROVIDERS,
+    detect_preferred_provider,
+    infer_provider,
+    list_llm_models,
+    provider_base_url,
+    resolve_for_init,
+)
 from mycoagent.node.specs import parse_csv, parse_models
 
 app = typer.Typer(no_args_is_help=True, help="MycoAgent: groups, catalog, host agents, policies")
@@ -114,6 +138,11 @@ def node(
         "--mailbox-queue",
         help="In-process assign_subtask queue slots while busy; 0 = reject with 409 immediately.",
     ),
+    config: Optional[str] = typer.Option(
+        None,
+        "--config",
+        help="YAML agents file. If present, fills name/skills/tools/llm for this Host (replaces CLI skills/executor).",
+    ),
 ) -> None:
     """Run a Host: one process, one or more agents, each with mailbox and heartbeat."""
     if not manager_url:
@@ -126,7 +155,7 @@ def node(
         opencode_timeout=opencode_timeout,
     )
     artifacts = artifact_store_from_env()
-    specs = _agent_specs(
+    specs = _resolve_specs(
         agent,
         name=name,
         skills=skills,
@@ -136,6 +165,7 @@ def node(
         tools_file=tools_file,
         capabilities_file=capabilities_file,
         id_file=id_file,
+        config_path=config,
     )
     attach_spec_llms(specs, max_steps=max_steps)
     if len(specs) == 1 and specs[0].root_mailbox:
@@ -152,10 +182,14 @@ def node(
             node_id=spec.agent_id,
             heartbeat_interval=heartbeat_interval,
             artifact_store=artifacts,
-            executor=worker,
-            planner=planner,
+            executor=spec.executor or worker,
+            planner=spec.planner or planner,
             job_db=job_db,
             mailbox_queue_size=mailbox_queue,
+            llm_base_url=spec.llm_base_url,
+            llm_api_key=spec.llm_api_key,
+            llm_model=spec.llm_model,
+            max_steps=max_steps,
         )
         uvicorn.run(create_node_app(runtime), host=host, port=port)
         return
@@ -172,6 +206,176 @@ def node(
         mailbox_queue_size=mailbox_queue,
     )
     uvicorn.run(create_host_app(host_runtime), host=host, port=port)
+
+
+@app.command()
+def init(
+    config: Optional[str] = typer.Option(
+        None,
+        "--config",
+        help="YAML path (default: /config/agents.yaml in Docker, else .mycoagent/agents.yaml)",
+    ),
+    force: bool = typer.Option(False, "--force", help="Re-run even if agents.yaml is already complete"),
+    yes: bool = typer.Option(False, "--yes", help="Non-interactive: write yaml from flags or existing file, then apply"),
+    apply: bool = typer.Option(True, "--apply/--no-apply", help="POST /configure to running Hosts after writing"),
+    provider: Optional[str] = typer.Option(
+        None,
+        "--provider",
+        help="echo, omlx (localhost:8000/v1), ollama (localhost:11434/v1), or custom",
+    ),
+    llm_url: Optional[str] = typer.Option(None, "--llm-url", help="OpenAI-compatible base URL (empty = Echo)"),
+    llm_model: Optional[str] = typer.Option(None, "--llm-model", help="If omitted, init lists GET /v1/models and uses the first chat model"),
+    llm_key: Optional[str] = typer.Option(None, "--llm-key", help="Optional API key"),
+    host_url: Optional[list[str]] = typer.Option(
+        None,
+        "--host-url",
+        help="Repeatable Host base URL to POST /configure (default: node-a/node-b in Docker, else 127.0.0.1:9001/9002)",
+    ),
+) -> None:
+    """Interactive (or --yes) per-agent LLM/skills setup. Writes yaml and applies to running Hosts."""
+    path = config or str(default_config_path())
+    existing = load_local_config(path)
+    if is_configured(existing) and not force:
+        typer.echo(f"Already configured ({path}):")
+        assert existing is not None
+        typer.echo(summarize(existing))
+        raise typer.Exit(code=0)
+    resolved_url = llm_url
+    resolved_model = llm_model
+    if provider or (llm_url and not llm_model):
+        try:
+            resolved_url, resolved_model, resolve_notes = resolve_for_init(
+                provider,
+                llm_url,
+                llm_model,
+                llm_key or "",
+            )
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        for note in resolve_notes:
+            typer.echo(f"warning: {note}", err=True)
+    if yes:
+        file = existing or default_agents(
+            llm_url=resolved_url or "",
+            llm_model=resolved_model or "",
+            llm_key=llm_key or "",
+        )
+        file = apply_flags(
+            file,
+            llm_url=resolved_url if resolved_url is not None else llm_url,
+            llm_model=resolved_model if resolved_model is not None else llm_model,
+            llm_key=llm_key,
+        )
+        if not file.agents:
+            file = default_agents(
+                llm_url=resolved_url or "",
+                llm_model=resolved_model or "",
+                llm_key=llm_key or "",
+            )
+    else:
+        file = _init_wizard(existing, provider=provider)
+    warned: list[str] = []
+    seen_urls: set[str] = set()
+    for agent in file.agents:
+        url = agent.llm_url.strip()
+        if url and url not in seen_urls:
+            seen_urls.add(url)
+            warning = probe_llm(url, agent.llm_key)
+            if warning:
+                warned.append(f"{agent.name}: {warning}")
+    save_local_config(path, file)
+    typer.echo(f"Wrote {path}")
+    typer.echo(summarize(file))
+    for item in warned:
+        typer.echo(f"warning: {item}", err=True)
+    if apply:
+        urls = host_url or default_host_urls()
+        apply_warnings = apply_config_to_hosts(file, urls)
+        for item in apply_warnings:
+            typer.echo(f"warning: apply {item}", err=True)
+        if not apply_warnings:
+            typer.echo(f"Applied to {len(list(zip(file.agents, urls)))} Host(s)")
+
+
+def _init_wizard(existing: LocalAgentsFile | None, *, provider: str | None = None) -> LocalAgentsFile:
+    seeds = (
+        list(existing.agents)
+        if existing and existing.agents
+        else default_agents().agents
+    )
+    out: list[LocalAgentConfig] = []
+    preferred = (provider or "").strip().lower() or detect_preferred_provider()
+    for seed in seeds:
+        typer.echo(f"--- {seed.name} ---")
+        name = typer.prompt("Name", default=seed.name)
+        skills = _csv(typer.prompt("Skills (comma-separated)", default=",".join(seed.skills) or "coding"))
+        tools = _csv(typer.prompt("Tools (comma-separated)", default=",".join(seed.tools) or "shell"))
+        seed_provider = infer_provider(seed.llm_url) if seed.llm_url.strip() else preferred
+        chosen = typer.prompt(
+            "Provider (echo / omlx / ollama / custom)",
+            default=seed_provider,
+        ).strip().lower()
+        if chosen not in PROVIDERS:
+            raise typer.BadParameter(f"provider must be one of {', '.join(PROVIDERS)}")
+        if chosen == "echo":
+            out.append(
+                LocalAgentConfig(
+                    name=name,
+                    skills=skills or ["coding"],
+                    tools=tools or ["shell"],
+                    executor="echo",
+                    llm_url="",
+                    llm_model="",
+                    llm_key="",
+                    models=[],
+                )
+            )
+            continue
+        default_url = provider_base_url(chosen) if chosen in {"omlx", "ollama"} else (seed.llm_url or "")
+        raw_url = typer.prompt("LLM base URL", default=default_url or seed.llm_url).strip()
+        if raw_url.lower() in {"echo", "none", "-"}:
+            llm_url = ""
+        else:
+            llm_url = raw_url
+        if not llm_url:
+            out.append(
+                LocalAgentConfig(
+                    name=name,
+                    skills=skills or ["coding"],
+                    tools=tools or ["shell"],
+                    executor="echo",
+                    llm_url="",
+                    llm_model="",
+                    llm_key="",
+                    models=[],
+                )
+            )
+            continue
+        listed, list_error = list_llm_models(llm_url)
+        if listed:
+            typer.echo("Available models: " + ", ".join(listed[:12]))
+        elif list_error:
+            typer.echo(f"warning: {list_error}", err=True)
+        llm_model = typer.prompt(
+            "Model",
+            default=seed.llm_model or (listed[0] if listed else ""),
+        ).strip()
+        llm_key = typer.prompt("API key (optional)", default=seed.llm_key, hide_input=True)
+        models_default = ",".join(seed.models) if seed.models else (f"{llm_model}:local:8192" if llm_model else "")
+        models = _csv(typer.prompt("Catalog models (name:source[:context])", default=models_default or ""))
+        out.append(
+            LocalAgentConfig(
+                name=name,
+                skills=skills or ["coding"],
+                tools=tools or ["shell"],
+                executor="auto",
+                llm_url=llm_url,
+                llm_model=llm_model,
+                llm_key=llm_key,
+                models=models,
+            )
+        )
+    return LocalAgentsFile(agents=out)
 
 
 def _csv(value: Optional[str]) -> list[str]:
@@ -257,6 +461,54 @@ def _skills_and_tools(
     return (
         merge_names(parse_csv(skills_csv), from_cap[0], skills_from_file),
         merge_names(parse_csv(tools_csv), from_cap[1], tools_from_file),
+    )
+
+
+def _resolve_specs(
+    agents: list[str] | None,
+    *,
+    name: str | None,
+    skills: str | None,
+    tools: str | None,
+    models: str | None,
+    skills_file: str | None = None,
+    tools_file: str | None = None,
+    capabilities_file: str | None = None,
+    id_file: str | None = None,
+    config_path: str | None = None,
+) -> list[AgentSpec]:
+    if agents:
+        return _agent_specs(
+            agents,
+            name=name,
+            skills=skills,
+            tools=tools,
+            models=models,
+            skills_file=skills_file,
+            tools_file=tools_file,
+            capabilities_file=capabilities_file,
+            id_file=id_file,
+        )
+    loaded = load_local_config(config_path) if config_path else None
+    if loaded is not None:
+        try:
+            entry = select_agent(loaded, name)
+        except KeyError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        spec = spec_from_local(entry)
+        spec.root_mailbox = True
+        spec.agent_id = resolve_agent_id(id_file=id_file)
+        return [spec]
+    return _agent_specs(
+        None,
+        name=name,
+        skills=skills,
+        tools=tools,
+        models=models,
+        skills_file=skills_file,
+        tools_file=tools_file,
+        capabilities_file=capabilities_file,
+        id_file=id_file,
     )
 
 
