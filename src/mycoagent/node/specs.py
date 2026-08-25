@@ -10,13 +10,7 @@ from mycoagent.version import __version__
 
 def detect_machine() -> MachineSpec:
     cpu = float(os.cpu_count() or 1)
-    memory_mb = 0
-    try:
-        page = os.sysconf("SC_PAGE_SIZE")
-        pages = os.sysconf("SC_PHYS_PAGES")
-        memory_mb = int(page * pages / (1024 * 1024))
-    except (ValueError, OSError, AttributeError):
-        memory_mb = 0
+    memory_mb = _physical_memory_mb()
     disk_gb: float | None = None
     try:
         usage = shutil.disk_usage("/")
@@ -25,6 +19,63 @@ def detect_machine() -> MachineSpec:
         disk_gb = None
     gpu = os.environ.get("MYCOAGENT_GPU")
     return MachineSpec(cpu_cores=cpu, memory_mb=memory_mb, gpu=gpu, disk_gb=disk_gb)
+
+
+def _physical_memory_mb() -> int:
+    try:
+        page = os.sysconf("SC_PAGE_SIZE")
+        pages = os.sysconf("SC_PHYS_PAGES")
+        if page and pages:
+            return int(page * pages / (1024 * 1024))
+    except (ValueError, OSError, AttributeError, TypeError):
+        pass
+    windows = _windows_memory_mb()
+    if windows:
+        return windows
+    return _proc_meminfo_mb()
+
+
+def _windows_memory_mb() -> int:
+    """GlobalMemoryStatusEx when POSIX sysconf is missing (Windows)."""
+    try:
+        import ctypes
+
+        windll = getattr(ctypes, "windll", None)
+        if windll is None:
+            return 0
+
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        stat = MEMORYSTATUSEX()
+        stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        if not windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+            return 0
+        return int(stat.ullTotalPhys // (1024 * 1024))
+    except (AttributeError, OSError, ValueError, OverflowError, TypeError):
+        return 0
+
+
+def _proc_meminfo_mb() -> int:
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("MemTotal:"):
+                    parts = line.split()
+                    return int(parts[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        return 0
+    return 0
 
 
 def detect_system() -> SystemSpec:

@@ -106,6 +106,12 @@ class ManagerClient:
         ]
         if query.exclude_node_id:
             params.append(("exclude_node_id", query.exclude_node_id))
+        if query.model:
+            params.append(("model", query.model))
+        if query.min_context_window is not None:
+            params.append(("min_context_window", str(query.min_context_window)))
+        if query.min_memory_mb is not None:
+            params.append(("min_memory_mb", str(query.min_memory_mb)))
         for skill in query.skills:
             params.append(("skills", skill))
         for tool in query.tools:

@@ -138,6 +138,9 @@ class CatalogQuery(BaseModel):
     skills: list[str] = Field(default_factory=list)
     tools: list[str] = Field(default_factory=list)
     exclude_node_id: str | None = None
+    model: str | None = None
+    min_context_window: int | None = None
+    min_memory_mb: int | None = None
 
 
 class SubtaskSpec(BaseModel):
@@ -145,6 +148,9 @@ class SubtaskSpec(BaseModel):
     skills: list[str] = Field(default_factory=list)
     tools: list[str] = Field(default_factory=list)
     payload: dict[str, Any] = Field(default_factory=dict)
+    model: str | None = None
+    min_context_window: int | None = None
+    min_memory_mb: int | None = None
 
 
 class JobSubmitRequest(BaseModel):
@@ -169,6 +175,9 @@ class SubtaskRecord(BaseModel):
     skills: list[str]
     tools: list[str]
     payload: dict[str, Any]
+    model: str | None = None
+    min_context_window: int | None = None
+    min_memory_mb: int | None = None
     assignee_node_id: str | None = None
     assignee_mailbox_url: str | None = None
     status: SubtaskStatus = SubtaskStatus.PENDING

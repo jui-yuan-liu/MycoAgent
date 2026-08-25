@@ -398,25 +398,11 @@ class ManagerStore:
                 """
                 SELECT * FROM nodes
                 WHERE group_name = ? AND membership_status = ?
-                ORDER BY name
+                ORDER BY last_seen, id
                 """,
                 (query.group, MembershipStatus.APPROVED.value),
             ).fetchall()
-        nodes = [mapping_to_node(row) for row in rows]
-        result: list[NodeRecord] = []
-        required_skills = set(query.skills)
-        required_tools = set(query.tools)
-        for node in nodes:
-            if query.exclude_node_id and node.id == query.exclude_node_id:
-                continue
-            if query.idle_only and node.status != NodeStatus.IDLE:
-                continue
-            if required_skills and not required_skills.issubset(set(node.skills)):
-                continue
-            if required_tools and not required_tools.issubset(set(node.tools_available)):
-                continue
-            result.append(node)
-        return result
+        return filter_catalog_nodes([mapping_to_node(row) for row in rows], query)
 
     def _expire_offline(self) -> None:
         cutoff = (_utcnow() - self.heartbeat_timeout).isoformat()
@@ -429,6 +415,36 @@ class ManagerStore:
                 (NodeStatus.OFFLINE.value, cutoff, NodeStatus.OFFLINE.value),
             )
             self._conn.commit()
+
+
+def catalog_matches(node: NodeRecord, query: CatalogQuery) -> bool:
+    """Skills/tools plus optional model name, min context_window, min memory_mb."""
+    if query.exclude_node_id and node.id == query.exclude_node_id:
+        return False
+    if query.idle_only and node.status != NodeStatus.IDLE:
+        return False
+    required_skills = set(query.skills)
+    if required_skills and not required_skills.issubset(set(node.skills)):
+        return False
+    required_tools = set(query.tools)
+    if required_tools and not required_tools.issubset(set(node.tools_available)):
+        return False
+    if query.min_memory_mb is not None and node.machine.memory_mb < query.min_memory_mb:
+        return False
+    models = list(node.models)
+    if query.model:
+        models = [item for item in models if item.name == query.model]
+        if not models:
+            return False
+    if query.min_context_window is not None:
+        if not any((item.context_window or 0) >= query.min_context_window for item in models):
+            return False
+    return True
+
+
+def filter_catalog_nodes(nodes: list[NodeRecord], query: CatalogQuery) -> list[NodeRecord]:
+    return [node for node in nodes if catalog_matches(node, query)]
+
 
 def mapping_to_node(row: Mapping[str, object]) -> NodeRecord:
     membership = row["membership_status"] if "membership_status" in row.keys() else "approved"

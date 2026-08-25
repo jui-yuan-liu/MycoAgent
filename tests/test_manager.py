@@ -7,6 +7,7 @@ from mycoagent.manager.store import ManagerStore
 from mycoagent.models import (
     HeartbeatRequest,
     MachineSpec,
+    ModelSpec,
     NodeRegisterRequest,
     NodeStatus,
     SystemSpec,
@@ -145,6 +146,24 @@ def test_unapproved_node_cannot_join_catalog(tmp_path):
     assert denied.json()["membership_status"] == "denied"
     catalog = client.get("/catalog", params={"group": "locked", "idle_only": True}).json()
     assert catalog == []
+
+
+def test_catalog_filters_model_context_and_memory_http(tmp_path):
+    client = _client(tmp_path)
+    body = _register(name="coder")
+    body.models = [ModelSpec(name="llama3", source="local", context_window=8192)]
+    body.machine = MachineSpec(cpu_cores=4, memory_mb=4096)
+    created = client.post("/nodes/register", json=body.model_dump(mode="json"))
+    assert created.status_code == 200
+    found = client.get(
+        "/catalog",
+        params={"group": "default", "model": "llama3", "min_context_window": 4000, "min_memory_mb": 2048},
+    )
+    assert len(found.json()) == 1
+    empty = client.get("/catalog", params={"group": "default", "model": "llama3", "min_context_window": 64000})
+    assert empty.json() == []
+    low_ram = client.get("/catalog", params={"group": "default", "min_memory_mb": 32000})
+    assert low_ram.json() == []
 
 
 def test_heartbeat_timeout_marks_offline(tmp_path):

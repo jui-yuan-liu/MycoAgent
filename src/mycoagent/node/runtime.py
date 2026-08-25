@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -48,6 +50,36 @@ class ParentForbidden(PermissionError):
     pass
 
 
+REPORT_ATTEMPTS = 2
+REPORT_RETRY_DELAY = 0.25
+DEFAULT_MAILBOX_QUEUE = 8
+
+
+def pick_dispatch_target(
+    candidates: list[NodeRecord],
+    inflight: dict[str, int],
+    round_robin: int,
+) -> tuple[NodeRecord, int]:
+    """Least in-flight, then round-robin among ties (not ORDER BY name)."""
+    if not candidates:
+        raise DispatchError("no idle matching node in the same group")
+    min_load = min(inflight.get(node.id, 0) for node in candidates)
+    pool = [node for node in candidates if inflight.get(node.id, 0) == min_load]
+    pool.sort(key=lambda node: node.id)
+    chosen = pool[round_robin % len(pool)]
+    return chosen, round_robin + 1
+
+
+def _job_db_path(base: str | None, agent_id: str, *, shared: bool) -> str | None:
+    if not base:
+        return None
+    if shared:
+        return base
+    path = Path(base)
+    suffix = path.suffix or ".db"
+    return str(path.with_name(f"{path.stem}-{agent_id}{suffix}"))
+
+
 @dataclass
 class AgentSpec:
     name: str
@@ -58,6 +90,26 @@ class AgentSpec:
     root_mailbox: bool = False
     executor: Executor | None = None
     planner: TaskPlanner | None = None
+    llm_base_url: str | None = None
+    llm_api_key: str | None = None
+    llm_model: str | None = None
+
+
+def attach_spec_llms(specs: list[AgentSpec], *, max_steps: int = 12) -> None:
+    """Give each spec with llm_base_url its own OpenAI-compatible client and executor."""
+    from mycoagent.node.executor import ChildAgentExecutor
+    from mycoagent.node.llm import OpenAICompatClient
+
+    for spec in specs:
+        if not spec.llm_base_url:
+            continue
+        llm = OpenAICompatClient(
+            base_url=spec.llm_base_url,
+            api_key=spec.llm_api_key or "",
+            model=spec.llm_model or "gpt-4o-mini",
+        )
+        spec.executor = ChildAgentExecutor(llm, max_steps=max_steps)
+        spec.planner = TaskPlanner(llm)
 
 
 class AgentRuntime:
@@ -81,6 +133,10 @@ class AgentRuntime:
         artifact_store: ArtifactStore | None = None,
         executor: Executor | None = None,
         planner: TaskPlanner | None = None,
+        jobs: JobStore | None = None,
+        job_db: str | None = None,
+        mailbox_queue_size: int = DEFAULT_MAILBOX_QUEUE,
+        dispatch_timeout: float = 10.0,
     ) -> None:
         self.manager_url = manager_url
         self.name = name
@@ -93,7 +149,8 @@ class AgentRuntime:
         self.node_id = node_id
         self.heartbeat_interval = heartbeat_interval
         self.record: NodeRecord | None = None
-        self.jobs = JobStore()
+        db_path = job_db if job_db is not None else os.environ.get("MYCOAGENT_JOB_DB")
+        self.jobs = jobs or JobStore(path=db_path)
         self.executor: Executor = executor or EchoExecutor()
         self.planner = planner
         self._own_manager = manager is None
@@ -103,9 +160,15 @@ class AgentRuntime:
         self.artifacts: ArtifactStore = artifact_store or MemoryArtifactStore()
         self._child_lock = asyncio.Lock()
         self._current_child: ChildWork | None = None
+        self._mailbox_queue_size = max(mailbox_queue_size, 0)
+        self._mailbox_queue: asyncio.Queue[AssignSubtaskMessage] = asyncio.Queue(
+            maxsize=self._mailbox_queue_size if self._mailbox_queue_size > 0 else 1
+        )
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._closed = False
         self.last_workspace_path: str | None = None
+        self._rr_index = 0
+        self.dispatch_timeout = dispatch_timeout
 
     @property
     def agent_id(self) -> str | None:
@@ -117,7 +180,9 @@ class AgentRuntime:
 
     @property
     def status(self) -> NodeStatus:
-        return NodeStatus.BUSY if self._current_child is not None else NodeStatus.IDLE
+        if self._current_child is not None or self._mailbox_queue.qsize() > 0:
+            return NodeStatus.BUSY
+        return NodeStatus.IDLE
 
     async def start(self) -> NodeRecord:
         req = NodeRegisterRequest(
@@ -150,6 +215,7 @@ class AgentRuntime:
             await self.manager.aclose()
         if self._own_mail:
             await self.mail.aclose()
+        self.jobs.close()
 
     async def submit_job(self, request: JobSubmitRequest) -> JobMemory:
         if not self.node_id:
@@ -276,19 +342,20 @@ class AgentRuntime:
     async def _accept_child(self, message: AssignSubtaskMessage) -> None:
         if message.parent_node_id == self.node_id:
             raise DispatchError("cannot accept a subtask from self")
+        start_now = False
         async with self._child_lock:
-            if self._current_child is not None:
-                raise BusyError("agent is busy with another child assignment")
-            self._current_child = ChildWork(
-                job_id=message.job_id,
-                subtask_id=message.subtask_id,
-                parent_node_id=message.parent_node_id,
-                parent_mailbox_url=message.parent_mailbox_url,
-                description=message.description,
-                payload=message.payload,
-                status=SubtaskStatus.RUNNING,
-            )
-        asyncio.create_task(self._run_child())
+            if self._current_child is None:
+                self._current_child = _child_from_assign(message)
+                start_now = True
+            else:
+                if self._mailbox_queue_size <= 0:
+                    raise BusyError("agent is busy with another child assignment")
+                try:
+                    self._mailbox_queue.put_nowait(message)
+                except asyncio.QueueFull as exc:
+                    raise BusyError("agent is busy and mailbox queue is full") from exc
+        if start_now:
+            asyncio.create_task(self._run_child())
 
     async def _run_child(self) -> None:
         work = self._current_child
@@ -334,10 +401,37 @@ class AgentRuntime:
                 error=str(exc),
             )
         try:
-            await self.mail.report(work.parent_mailbox_url, result)
+            await self._report_result(work.parent_mailbox_url, result)
         finally:
+            nxt: AssignSubtaskMessage | None = None
             async with self._child_lock:
                 self._current_child = None
+                try:
+                    nxt = self._mailbox_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    nxt = None
+                if nxt is not None:
+                    self._current_child = _child_from_assign(nxt)
+            if nxt is not None:
+                asyncio.create_task(self._run_child())
+
+    async def _report_result(self, parent_mailbox_url: str, result: SubtaskResultMessage) -> None:
+        last: Exception | None = None
+        for attempt in range(REPORT_ATTEMPTS):
+            try:
+                await self.mail.report(parent_mailbox_url, result)
+                return
+            except Exception as exc:  # noqa: BLE001 — retry at least once
+                last = exc
+                log.warning(
+                    "subtask_result report failed (attempt %s/%s): %s",
+                    attempt + 1,
+                    REPORT_ATTEMPTS,
+                    exc,
+                )
+                if attempt + 1 < REPORT_ATTEMPTS:
+                    await asyncio.sleep(REPORT_RETRY_DELAY)
+        log.error("subtask_result report exhausted retries: %s", last)
 
     async def _accept_result(self, message: SubtaskResultMessage) -> None:
         job = await self.jobs.get(message.job_id)
@@ -397,12 +491,16 @@ class AgentRuntime:
                     skills=list(spec.skills),
                     tools=list(spec.tools),
                     exclude_node_id=self.node_id,
+                    model=getattr(spec, "model", None),
+                    min_context_window=getattr(spec, "min_context_window", None),
+                    min_memory_mb=getattr(spec, "min_memory_mb", None),
                 )
             )
             candidates = [node for node in candidates if node.id not in blocked]
             if not candidates:
                 raise DispatchError("no idle matching node in the same group")
-            target = candidates[0]
+            inflight = await self.jobs.inflight_counts()
+            target, self._rr_index = pick_dispatch_target(candidates, inflight, self._rr_index)
             if target.id == self.node_id:
                 raise DispatchError("refusing to dispatch to self")
             if target.group != self.group:
@@ -414,19 +512,31 @@ class AgentRuntime:
             assignee_node_id=target.id,
             assignee_mailbox_url=target.mailbox_url,
         )
-        await self.mail.assign(
-            target.mailbox_url,
-            AssignSubtaskMessage(
-                job_id=job_id,
-                subtask_id=subtask_id,
-                parent_node_id=self.node_id or "",
-                parent_mailbox_url=self.mailbox_url,
-                description=spec.description,
-                skills=list(spec.skills),
-                tools=list(spec.tools),
-                payload=dict(spec.payload),
-            ),
-        )
+        try:
+            await asyncio.wait_for(
+                self.mail.assign(
+                    target.mailbox_url,
+                    AssignSubtaskMessage(
+                        job_id=job_id,
+                        subtask_id=subtask_id,
+                        parent_node_id=self.node_id or "",
+                        parent_mailbox_url=self.mailbox_url,
+                        description=spec.description,
+                        skills=list(spec.skills),
+                        tools=list(spec.tools),
+                        payload=dict(spec.payload),
+                    ),
+                ),
+                timeout=self.dispatch_timeout,
+            )
+        except TimeoutError as exc:
+            await self.jobs.update_subtask(
+                job_id,
+                subtask_id,
+                status=SubtaskStatus.FAILED,
+                error="dispatch timed out",
+            )
+            raise DispatchError("dispatch timed out") from exc
         await self.jobs.update_subtask(job_id, subtask_id, status=SubtaskStatus.RUNNING)
 
     async def _heartbeat_loop(self) -> None:
@@ -459,6 +569,8 @@ class HostRuntime:
         artifact_store: ArtifactStore | None = None,
         executor: Executor | None = None,
         planner: TaskPlanner | None = None,
+        job_db: str | None = None,
+        mailbox_queue_size: int = DEFAULT_MAILBOX_QUEUE,
     ) -> None:
         if not specs:
             raise ValueError("host needs at least one agent")
@@ -472,6 +584,8 @@ class HostRuntime:
         self.agents: dict[str, AgentRuntime] = {}
         self._ordered: list[AgentRuntime] = []
         default_executor = executor or EchoExecutor()
+        job_base = job_db if job_db is not None else os.environ.get("MYCOAGENT_JOB_DB")
+        shared_jobs = len(specs) == 1
         for spec in specs:
             agent_id = spec.agent_id or str(uuid4())
             mailbox = (
@@ -495,6 +609,8 @@ class HostRuntime:
                 artifact_store=self.artifacts,
                 executor=spec.executor or default_executor,
                 planner=spec.planner or planner,
+                job_db=_job_db_path(job_base, agent_id, shared=shared_jobs),
+                mailbox_queue_size=mailbox_queue_size,
             )
             self._ordered.append(agent)
 
@@ -527,6 +643,18 @@ class HostRuntime:
             await agent.close()
         await self.manager.aclose()
         await self.mail.aclose()
+
+
+def _child_from_assign(message: AssignSubtaskMessage) -> ChildWork:
+    return ChildWork(
+        job_id=message.job_id,
+        subtask_id=message.subtask_id,
+        parent_node_id=message.parent_node_id,
+        parent_mailbox_url=message.parent_mailbox_url,
+        description=message.description,
+        payload=message.payload,
+        status=SubtaskStatus.RUNNING,
+    )
 
 
 def _find_subtask(job: JobMemory, subtask_id: str) -> SubtaskRecord | None:

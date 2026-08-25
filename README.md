@@ -2,7 +2,7 @@
 
 群組、資源目錄、Host 上的多個 agent 信箱。Cluster Manager 只管通訊錄與群組政策；任務記憶只活在發起任務的父 agent。子 agent 用**可插拔執行器**做事（預設內建 tool loop，可改 Echo 或本機 OpenCode），把產物上傳 MinIO／S3 後清掉工作區，只回報摘要與 artifact id。兄弟不互連。信箱是自有 JSON，不是 A2A。
 
-逐步從零跑起來：請看 **[文件目錄](docs/README.md)**（[快速使用指南](docs/快速使用指南.md)、[系統架構](docs/系統架構.md)、[工作流程](docs/工作流程.md)、[未來開發計畫](docs/未來開發計畫.md)）。完整逐步操作仍在 **[入門啟用指南](docs/入門啟用指南.md)**。
+逐步從零跑起來：請看 **[文件目錄](docs/README.md)**（[快速使用指南](docs/快速使用指南.md)、[Agent 註冊指南](docs/agent註冊指南.md)、[系統架構](docs/系統架構.md)、[工作流程](docs/工作流程.md)、[未來開發計畫](docs/未來開發計畫.md)）。完整逐步操作仍在 **[入門啟用指南](docs/入門啟用指南.md)**。
 
 ## 角色
 
@@ -101,4 +101,4 @@ docker images | grep -i agentgraph
 
 ## 控制面叢集化
 
-分階段說明（C0 已做、C1–C3 未做）見 **[未來開發計畫](docs/未來開發計畫.md)**。刻意不做：Akka Cluster、把 JobMemory 搬進 Manager、LiteFS 硬撐多寫者 SQLite。
+C0／C1 已做（Postgres + 兩份 Manager 見 [`docker-compose.cluster.yml`](docker-compose.cluster.yml)）。**C2（etcd／Redis lease）與 C3（gossip）仍是未來**，見 **[未來開發計畫](docs/未來開發計畫.md)**。刻意不做：Akka Cluster、把 JobMemory 搬進 Manager、LiteFS 硬撐多寫者 SQLite。

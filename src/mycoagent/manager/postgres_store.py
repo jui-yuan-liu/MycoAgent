@@ -11,6 +11,7 @@ from mycoagent.manager.store import (
     MembershipError,
     NodeNotFound,
     RegisterForbidden,
+    filter_catalog_nodes,
     mapping_to_node,
 )
 from mycoagent.models import (
@@ -329,25 +330,11 @@ class PostgresManagerStore:
                 """
                 SELECT * FROM nodes
                 WHERE group_name = %s AND membership_status = %s
-                ORDER BY name
+                ORDER BY last_seen, id
                 """,
                 (query.group, MembershipStatus.APPROVED.value),
             ).fetchall()
-        nodes = [mapping_to_node(row) for row in rows]
-        result: list[NodeRecord] = []
-        required_skills = set(query.skills)
-        required_tools = set(query.tools)
-        for node in nodes:
-            if query.exclude_node_id and node.id == query.exclude_node_id:
-                continue
-            if query.idle_only and node.status != NodeStatus.IDLE:
-                continue
-            if required_skills and not required_skills.issubset(set(node.skills)):
-                continue
-            if required_tools and not required_tools.issubset(set(node.tools_available)):
-                continue
-            result.append(node)
-        return result
+        return filter_catalog_nodes([mapping_to_node(row) for row in rows], query)
 
     def _expire_offline(self) -> None:
         cutoff = (_utcnow() - self.heartbeat_timeout).isoformat()

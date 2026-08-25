@@ -131,6 +131,9 @@ def create_app(store: ManagerStoreProtocol, bootstrap_group: str | None = None) 
         skills: list[str] = Query(default=[]),
         tools: list[str] = Query(default=[]),
         exclude_node_id: str | None = None,
+        model: str | None = None,
+        min_context_window: int | None = None,
+        min_memory_mb: int | None = None,
     ) -> list[NodeRecord]:
         try:
             return store.query_catalog(
@@ -140,6 +143,9 @@ def create_app(store: ManagerStoreProtocol, bootstrap_group: str | None = None) 
                     skills=skills,
                     tools=tools,
                     exclude_node_id=exclude_node_id,
+                    model=model,
+                    min_context_window=min_context_window,
+                    min_memory_mb=min_memory_mb,
                 )
             )
         except GroupNotFound as exc:

@@ -70,6 +70,10 @@ def node_server(
     executor: Executor | None = None,
     artifact_store: ArtifactStore | None = None,
     planner: TaskPlanner | None = None,
+    node_id: str | None = None,
+    models: list | None = None,
+    mailbox_queue_size: int = 8,
+    job_db: str | None = None,
 ) -> Iterator[tuple[str, NodeRuntime]]:
     port = free_port()
     mailbox = f"http://127.0.0.1:{port}"
@@ -81,10 +85,14 @@ def node_server(
         skills=skills or ["coding"],
         tools_declared=tools or ["shell"],
         tools_available=tools or ["shell"],
+        models=models or [],
+        node_id=node_id,
         heartbeat_interval=heartbeat_interval,
         executor=executor,
         artifact_store=artifact_store,
         planner=planner,
+        mailbox_queue_size=mailbox_queue_size,
+        job_db=job_db,
     )
     app = create_node_app(runtime)
     with run_app(app, port=port) as url:
@@ -109,6 +117,7 @@ def host_server(
             name=str(item["name"]),
             skills=list(item.get("skills") or ["coding"]),  # type: ignore[arg-type]
             tools=list(item.get("tools") or ["shell"]),  # type: ignore[arg-type]
+            agent_id=str(item["agent_id"]) if item.get("agent_id") else None,
             root_mailbox=len(agents) == 1,
         )
         for item in agents

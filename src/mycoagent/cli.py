@@ -15,8 +15,16 @@ from mycoagent.node.api import create_host_app, create_node_app
 from mycoagent.node.executor import ChildAgentExecutor, EchoExecutor
 from mycoagent.node.llm import llm_from_env
 from mycoagent.node.opencode import OpenCodeExecutor
+from mycoagent.node.identity import ID_FILE_ENV, resolve_agent_id
 from mycoagent.node.planner import TaskPlanner
-from mycoagent.node.runtime import AgentSpec, HostRuntime, NodeRuntime
+from mycoagent.node.runtime import (
+    DEFAULT_MAILBOX_QUEUE,
+    AgentSpec,
+    HostRuntime,
+    NodeRuntime,
+    attach_spec_llms,
+)
+from mycoagent.node.capabilities import load_capabilities, load_names, merge_names
 from mycoagent.node.specs import parse_csv, parse_models
 
 app = typer.Typer(no_args_is_help=True, help="MycoAgent: groups, catalog, host agents, policies")
@@ -55,10 +63,25 @@ def node(
     skills: Optional[str] = None,
     tools: Optional[str] = None,
     models: Optional[str] = None,
+    skills_file: Optional[str] = typer.Option(
+        None,
+        "--skills-file",
+        help="File or directory of local skill names (JSON list, one-per-line, or SKILL.md folders)",
+    ),
+    tools_file: Optional[str] = typer.Option(
+        None,
+        "--tools-file",
+        help="File or directory of local tool names (same formats as --skills-file)",
+    ),
+    capabilities_file: Optional[str] = typer.Option(
+        None,
+        "--capabilities-file",
+        help="JSON {skills,tools} or a directory containing both",
+    ),
     agent: Optional[list[str]] = typer.Option(
         None,
         "--agent",
-        help="Repeatable. name=alpha,skills=coding,tools=shell,models=gpt-4:api",
+        help="Repeatable. name=alpha,skills=coding,tools=shell,id_file=/path,llm_url=http://127.0.0.1:11434,llm_model=llama3",
     ),
     executor_name: str = typer.Option(
         "auto",
@@ -74,6 +97,23 @@ def node(
     ),
     opencode_timeout: float = typer.Option(120.0, "--opencode-timeout"),
     heartbeat_interval: float = 5.0,
+    id_file: Optional[str] = typer.Option(
+        None,
+        "--id-file",
+        envvar=ID_FILE_ENV,
+        help="Read/write this agent's catalog id (or MYCOAGENT_ID_FILE). MYCOAGENT_AGENT_ID also works.",
+    ),
+    job_db: Optional[str] = typer.Option(
+        None,
+        "--job-db",
+        envvar="MYCOAGENT_JOB_DB",
+        help="Optional SQLite file for parent JobMemory (MYCOAGENT_JOB_DB).",
+    ),
+    mailbox_queue: int = typer.Option(
+        DEFAULT_MAILBOX_QUEUE,
+        "--mailbox-queue",
+        help="In-process assign_subtask queue slots while busy; 0 = reject with 409 immediately.",
+    ),
 ) -> None:
     """Run a Host: one process, one or more agents, each with mailbox and heartbeat."""
     if not manager_url:
@@ -86,7 +126,18 @@ def node(
         opencode_timeout=opencode_timeout,
     )
     artifacts = artifact_store_from_env()
-    specs = _agent_specs(agent, name=name, skills=skills, tools=tools, models=models)
+    specs = _agent_specs(
+        agent,
+        name=name,
+        skills=skills,
+        tools=tools,
+        models=models,
+        skills_file=skills_file,
+        tools_file=tools_file,
+        capabilities_file=capabilities_file,
+        id_file=id_file,
+    )
+    attach_spec_llms(specs, max_steps=max_steps)
     if len(specs) == 1 and specs[0].root_mailbox:
         spec = specs[0]
         runtime = NodeRuntime(
@@ -98,10 +149,13 @@ def node(
             tools_declared=spec.tools,
             tools_available=spec.tools,
             models=spec.models,
+            node_id=spec.agent_id,
             heartbeat_interval=heartbeat_interval,
             artifact_store=artifacts,
             executor=worker,
             planner=planner,
+            job_db=job_db,
+            mailbox_queue_size=mailbox_queue,
         )
         uvicorn.run(create_node_app(runtime), host=host, port=port)
         return
@@ -114,6 +168,8 @@ def node(
         artifact_store=artifacts,
         executor=worker,
         planner=planner,
+        job_db=job_db,
+        mailbox_queue_size=mailbox_queue,
     )
     uvicorn.run(create_host_app(host_runtime), host=host, port=port)
 
@@ -158,12 +214,49 @@ def _parse_agent_option(raw: str) -> AgentSpec:
     name = fields.get("name")
     if not name:
         raise typer.BadParameter("--agent needs name=...")
+    try:
+        skills, tools = _skills_and_tools(
+            skills_csv=fields.get("skills"),
+            tools_csv=fields.get("tools"),
+            skills_file=fields.get("skills_file"),
+            tools_file=fields.get("tools_file"),
+            capabilities_file=fields.get("capabilities_file"),
+        )
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
     return AgentSpec(
         name=name,
-        skills=parse_csv(fields.get("skills")),
-        tools=parse_csv(fields.get("tools")),
+        skills=skills,
+        tools=tools,
         models=parse_models(fields.get("models")),
+        agent_id=resolve_agent_id(
+            explicit=fields.get("id"),
+            id_file=fields.get("id_file"),
+            env_id=None,
+        ),
         root_mailbox=False,
+        llm_base_url=fields.get("llm_url") or None,
+        llm_api_key=fields.get("llm_key") or None,
+        llm_model=fields.get("llm_model") or None,
+    )
+
+
+def _skills_and_tools(
+    *,
+    skills_csv: str | None,
+    tools_csv: str | None,
+    skills_file: str | None,
+    tools_file: str | None,
+    capabilities_file: str | None,
+) -> tuple[list[str], list[str]]:
+    from_cap: tuple[list[str], list[str]] = ([], [])
+    if capabilities_file:
+        from_cap = load_capabilities(capabilities_file)
+    skills_from_file = load_names(skills_file, kind="skills") if skills_file else []
+    tools_from_file = load_names(tools_file, kind="tools") if tools_file else []
+    return (
+        merge_names(parse_csv(skills_csv), from_cap[0], skills_from_file),
+        merge_names(parse_csv(tools_csv), from_cap[1], tools_from_file),
     )
 
 
@@ -174,6 +267,10 @@ def _agent_specs(
     skills: str | None,
     tools: str | None,
     models: str | None,
+    skills_file: str | None = None,
+    tools_file: str | None = None,
+    capabilities_file: str | None = None,
+    id_file: str | None = None,
 ) -> list[AgentSpec]:
     if agents:
         specs = [_parse_agent_option(item) for item in agents]
@@ -182,12 +279,23 @@ def _agent_specs(
         return specs
     if not name:
         raise typer.BadParameter("provide --name or at least one --agent")
+    try:
+        skill_names, tool_names = _skills_and_tools(
+            skills_csv=skills,
+            tools_csv=tools,
+            skills_file=skills_file,
+            tools_file=tools_file,
+            capabilities_file=capabilities_file,
+        )
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
     return [
         AgentSpec(
             name=name,
-            skills=parse_csv(skills),
-            tools=parse_csv(tools),
+            skills=skill_names,
+            tools=tool_names,
             models=parse_models(models),
+            agent_id=resolve_agent_id(id_file=id_file),
             root_mailbox=True,
         )
     ]
@@ -281,6 +389,9 @@ def catalog(
     idle_only: bool = True,
     skills: Optional[str] = None,
     tools: Optional[str] = None,
+    model: Optional[str] = None,
+    min_context_window: Optional[int] = typer.Option(None, "--min-context-window"),
+    min_memory_mb: Optional[int] = typer.Option(None, "--min-memory-mb"),
 ) -> None:
     params: list[tuple[str, str]] = [("group", group), ("idle_only", str(idle_only).lower())]
     if skills:
@@ -289,6 +400,12 @@ def catalog(
     if tools:
         for item in tools.split(","):
             params.append(("tools", item.strip()))
+    if model:
+        params.append(("model", model))
+    if min_context_window is not None:
+        params.append(("min_context_window", str(min_context_window)))
+    if min_memory_mb is not None:
+        params.append(("min_memory_mb", str(min_memory_mb)))
     response = httpx.get(f"{manager_url.rstrip('/')}/catalog", params=params, timeout=10.0)
     _print_response(response)
 
