@@ -51,9 +51,14 @@ def run_app(app, host: str = "127.0.0.1", port: int | None = None) -> Iterator[s
 
 
 @contextmanager
-def manager_server(tmp_path, bootstrap_group: str = "default") -> Iterator[str]:
+def manager_server(
+    tmp_path,
+    bootstrap_group: str = "default",
+    *,
+    token: str | None = None,
+) -> Iterator[str]:
     store = ManagerStore(str(tmp_path / "mgr.db"), heartbeat_timeout_seconds=2)
-    app = create_app(store, bootstrap_group=bootstrap_group)
+    app = create_app(store, bootstrap_group=bootstrap_group, token=token)
     with run_app(app) as url:
         yield url
 
@@ -74,6 +79,7 @@ def node_server(
     models: list | None = None,
     mailbox_queue_size: int = 8,
     job_db: str | None = None,
+    token: str | None = None,
 ) -> Iterator[tuple[str, NodeRuntime]]:
     port = free_port()
     mailbox = f"http://127.0.0.1:{port}"
@@ -93,8 +99,9 @@ def node_server(
         planner=planner,
         mailbox_queue_size=mailbox_queue_size,
         job_db=job_db,
+        token=token,
     )
-    app = create_node_app(runtime)
+    app = create_node_app(runtime, token=token)
     with run_app(app, port=port) as url:
         yield url, runtime
 
@@ -109,6 +116,7 @@ def host_server(
     executor: Executor | None = None,
     artifact_store: ArtifactStore | None = None,
     planner: TaskPlanner | None = None,
+    token: str | None = None,
 ) -> Iterator[tuple[str, HostRuntime]]:
     port = free_port()
     advertise = f"http://127.0.0.1:{port}"
@@ -131,8 +139,9 @@ def host_server(
         artifact_store=artifact_store,
         executor=executor,
         planner=planner,
+        token=token,
     )
-    app = create_host_app(host)
+    app = create_host_app(host, token=token)
     with run_app(app, port=port) as url:
         yield url, host
 

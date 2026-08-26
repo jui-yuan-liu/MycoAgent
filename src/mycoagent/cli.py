@@ -8,6 +8,7 @@ import typer
 import uvicorn
 
 from mycoagent.artifacts import artifact_store_from_env
+from mycoagent.auth import TOKEN_ENV, bearer_headers, resolve_token
 from mycoagent.manager.api import create_app
 from mycoagent.manager.store import open_store
 from mycoagent.models import ForwardRequest, JobSubmitRequest, SubtaskSpec
@@ -63,10 +64,20 @@ def manager(
     db: str = "mycoagent.db",
     bootstrap_group: Optional[str] = "default",
     heartbeat_timeout: int = 15,
+    token: Optional[str] = typer.Option(
+        None,
+        "--token",
+        envvar=TOKEN_ENV,
+        help="Optional shared Bearer token (or MYCOAGENT_TOKEN). Unset = open.",
+    ),
 ) -> None:
     """Run Cluster Manager (groups + resource catalog). --db is a SQLite path or postgres:// DSN."""
     store = open_store(db, heartbeat_timeout_seconds=heartbeat_timeout)
-    uvicorn.run(create_app(store, bootstrap_group=bootstrap_group), host=host, port=port)
+    uvicorn.run(
+        create_app(store, bootstrap_group=bootstrap_group, token=resolve_token(token)),
+        host=host,
+        port=port,
+    )
 
 
 @app.command()
@@ -143,11 +154,18 @@ def node(
         "--config",
         help="YAML agents file. If present, fills name/skills/tools/llm for this Host (replaces CLI skills/executor).",
     ),
+    token: Optional[str] = typer.Option(
+        None,
+        "--token",
+        envvar=TOKEN_ENV,
+        help="Optional shared Bearer token (or MYCOAGENT_TOKEN). Unset = open.",
+    ),
 ) -> None:
     """Run a Host: one process, one or more agents, each with mailbox and heartbeat."""
     if not manager_url:
         raise typer.BadParameter("provide --manager or set MYCOAGENT_MANAGER")
     mailbox_base = (advertise or f"http://127.0.0.1:{port}").rstrip("/")
+    auth_token = resolve_token(token)
     worker, planner = _executor_and_planner(
         executor_name,
         max_steps,
@@ -190,8 +208,9 @@ def node(
             llm_api_key=spec.llm_api_key,
             llm_model=spec.llm_model,
             max_steps=max_steps,
+            token=auth_token,
         )
-        uvicorn.run(create_node_app(runtime), host=host, port=port)
+        uvicorn.run(create_node_app(runtime, token=auth_token), host=host, port=port)
         return
     host_runtime = HostRuntime(
         manager_url=manager_url,
@@ -204,8 +223,9 @@ def node(
         planner=planner,
         job_db=job_db,
         mailbox_queue_size=mailbox_queue,
+        token=auth_token,
     )
-    uvicorn.run(create_host_app(host_runtime), host=host, port=port)
+    uvicorn.run(create_host_app(host_runtime, token=auth_token), host=host, port=port)
 
 
 @app.command()
@@ -571,6 +591,7 @@ def groups_create(
             "allow_register": _csv(allow_register),
             "allow_parent": _csv(allow_parent),
         },
+        headers=_ctl_headers(),
         timeout=10.0,
     )
     _print_response(response)
@@ -594,13 +615,22 @@ def groups_update(
         body["allow_register"] = _csv(allow_register)
     if allow_parent is not None:
         body["allow_parent"] = _csv(allow_parent)
-    response = httpx.patch(f"{manager_url.rstrip('/')}/groups/{name}", json=body, timeout=10.0)
+    response = httpx.patch(
+        f"{manager_url.rstrip('/')}/groups/{name}",
+        json=body,
+        headers=_ctl_headers(),
+        timeout=10.0,
+    )
     _print_response(response)
 
 
 @ctl.command("group")
 def group_get(name: str, manager_url: str = typer.Option("http://127.0.0.1:8080", "--manager")) -> None:
-    response = httpx.get(f"{manager_url.rstrip('/')}/groups/{name}", timeout=10.0)
+    response = httpx.get(
+        f"{manager_url.rstrip('/')}/groups/{name}",
+        headers=_ctl_headers(),
+        timeout=10.0,
+    )
     _print_response(response)
 
 
@@ -611,7 +641,9 @@ def approve(
     manager_url: str = typer.Option("http://127.0.0.1:8080", "--manager"),
 ) -> None:
     response = httpx.post(
-        f"{manager_url.rstrip('/')}/groups/{group}/approve/{node_id}", timeout=10.0
+        f"{manager_url.rstrip('/')}/groups/{group}/approve/{node_id}",
+        headers=_ctl_headers(),
+        timeout=10.0,
     )
     _print_response(response)
 
@@ -623,14 +655,20 @@ def deny(
     manager_url: str = typer.Option("http://127.0.0.1:8080", "--manager"),
 ) -> None:
     response = httpx.post(
-        f"{manager_url.rstrip('/')}/groups/{group}/deny/{node_id}", timeout=10.0
+        f"{manager_url.rstrip('/')}/groups/{group}/deny/{node_id}",
+        headers=_ctl_headers(),
+        timeout=10.0,
     )
     _print_response(response)
 
 
 @ctl.command("groups")
 def groups_list(manager_url: str = typer.Option("http://127.0.0.1:8080", "--manager")) -> None:
-    response = httpx.get(f"{manager_url.rstrip('/')}/groups", timeout=10.0)
+    response = httpx.get(
+        f"{manager_url.rstrip('/')}/groups",
+        headers=_ctl_headers(),
+        timeout=10.0,
+    )
     _print_response(response)
 
 
@@ -658,7 +696,12 @@ def catalog(
         params.append(("min_context_window", str(min_context_window)))
     if min_memory_mb is not None:
         params.append(("min_memory_mb", str(min_memory_mb)))
-    response = httpx.get(f"{manager_url.rstrip('/')}/catalog", params=params, timeout=10.0)
+    response = httpx.get(
+        f"{manager_url.rstrip('/')}/catalog",
+        params=params,
+        headers=_ctl_headers(),
+        timeout=10.0,
+    )
     _print_response(response)
 
 
@@ -683,6 +726,7 @@ def submit(
     response = httpx.post(
         f"{node_url.rstrip('/')}/jobs",
         json=body.model_dump(mode="json"),
+        headers=_ctl_headers(),
         timeout=30.0,
     )
     _print_response(response)
@@ -714,9 +758,14 @@ def forward(
     response = httpx.post(
         f"{node_url.rstrip('/')}/jobs/{job_id}/forward",
         json=body.model_dump(mode="json"),
+        headers=_ctl_headers(),
         timeout=30.0,
     )
     _print_response(response)
+
+
+def _ctl_headers() -> dict[str, str]:
+    return bearer_headers(resolve_token())
 
 
 def _print_response(response: httpx.Response) -> None:

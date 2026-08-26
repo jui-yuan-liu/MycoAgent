@@ -3,8 +3,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 
-from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 
+from mycoagent.auth import enforce_bearer
 from mycoagent.models import AgentConfigureRequest, Envelope, ForwardRequest, JobMemory, JobSubmitRequest
 from mycoagent.node.runtime import (
     AgentRuntime,
@@ -17,10 +18,22 @@ from mycoagent.node.runtime import (
 from mycoagent.version import __version__
 
 
-def _agent_router(get_agent: Callable[[], AgentRuntime]) -> APIRouter:
-    router = APIRouter()
+def _token_dependency(token: str | None):
+    async def _check(request: Request) -> None:
+        await enforce_bearer(request, token)
 
-    @router.post("/jobs", response_model=JobMemory)
+    return Depends(_check)
+
+
+def _agent_router(
+    get_agent: Callable[[], AgentRuntime],
+    *,
+    write_auth=None,
+) -> APIRouter:
+    router = APIRouter()
+    writes = [write_auth] if write_auth is not None else []
+
+    @router.post("/jobs", response_model=JobMemory, dependencies=writes)
     async def submit_job(body: JobSubmitRequest) -> JobMemory:
         try:
             return await get_agent().submit_job(body)
@@ -43,7 +56,7 @@ def _agent_router(get_agent: Callable[[], AgentRuntime]) -> APIRouter:
             )
         return job
 
-    @router.post("/jobs/{job_id}/forward", response_model=JobMemory)
+    @router.post("/jobs/{job_id}/forward", response_model=JobMemory, dependencies=writes)
     async def forward_subtask(job_id: str, body: ForwardRequest) -> JobMemory:
         try:
             return await get_agent().forward_subtask(job_id, body)
@@ -62,7 +75,7 @@ def _agent_router(get_agent: Callable[[], AgentRuntime]) -> APIRouter:
             return {"current": None}
         return {"current": work.model_dump(mode="json")}
 
-    @router.post("/mailbox")
+    @router.post("/mailbox", dependencies=writes)
     async def mailbox(envelope: Envelope) -> dict[str, object]:
         try:
             return await get_agent().handle_envelope(envelope)
@@ -75,7 +88,7 @@ def _agent_router(get_agent: Callable[[], AgentRuntime]) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @router.post("/configure")
+    @router.post("/configure", dependencies=writes)
     async def configure(body: AgentConfigureRequest) -> dict[str, object]:
         record = await get_agent().apply_config(body)
         return _configure_result(record)
@@ -83,10 +96,15 @@ def _agent_router(get_agent: Callable[[], AgentRuntime]) -> APIRouter:
     return router
 
 
-def _scoped_agent_router(fetch: Callable[[str], AgentRuntime]) -> APIRouter:
+def _scoped_agent_router(
+    fetch: Callable[[str], AgentRuntime],
+    *,
+    write_auth=None,
+) -> APIRouter:
     router = APIRouter()
+    writes = [write_auth] if write_auth is not None else []
 
-    @router.post("/jobs", response_model=JobMemory)
+    @router.post("/jobs", response_model=JobMemory, dependencies=writes)
     async def submit_job(agent_id: str, body: JobSubmitRequest) -> JobMemory:
         try:
             return await fetch(agent_id).submit_job(body)
@@ -109,7 +127,7 @@ def _scoped_agent_router(fetch: Callable[[str], AgentRuntime]) -> APIRouter:
             )
         return job
 
-    @router.post("/jobs/{job_id}/forward", response_model=JobMemory)
+    @router.post("/jobs/{job_id}/forward", response_model=JobMemory, dependencies=writes)
     async def forward_subtask(agent_id: str, job_id: str, body: ForwardRequest) -> JobMemory:
         try:
             return await fetch(agent_id).forward_subtask(job_id, body)
@@ -128,7 +146,7 @@ def _scoped_agent_router(fetch: Callable[[str], AgentRuntime]) -> APIRouter:
             return {"current": None}
         return {"current": work.model_dump(mode="json")}
 
-    @router.post("/mailbox")
+    @router.post("/mailbox", dependencies=writes)
     async def mailbox(agent_id: str, envelope: Envelope) -> dict[str, object]:
         try:
             return await fetch(agent_id).handle_envelope(envelope)
@@ -141,7 +159,7 @@ def _scoped_agent_router(fetch: Callable[[str], AgentRuntime]) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @router.post("/configure")
+    @router.post("/configure", dependencies=writes)
     async def configure(agent_id: str, body: AgentConfigureRequest) -> dict[str, object]:
         record = await fetch(agent_id).apply_config(body)
         return _configure_result(record)
@@ -169,7 +187,9 @@ def _configure_result(record) -> dict[str, object]:
     }
 
 
-def create_node_app(runtime: NodeRuntime) -> FastAPI:
+def create_node_app(runtime: NodeRuntime, *, token: str | None = None) -> FastAPI:
+    write_auth = _token_dependency(token) if token else None
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         await runtime.start()
@@ -179,6 +199,7 @@ def create_node_app(runtime: NodeRuntime) -> FastAPI:
     app = FastAPI(title="MycoAgent Host", version=__version__, lifespan=lifespan)
     app.state.runtime = runtime
     app.state.host = None
+    app.state.token = token
 
     @app.get("/health")
     def health() -> dict[str, object]:
@@ -200,12 +221,17 @@ def create_node_app(runtime: NodeRuntime) -> FastAPI:
             raise HTTPException(status_code=404, detail=f"agent not found: {agent_id}")
         return runtime
 
-    app.include_router(_agent_router(lambda: runtime))
-    app.include_router(_scoped_agent_router(fetch), prefix="/agents/{agent_id}")
+    app.include_router(_agent_router(lambda: runtime, write_auth=write_auth))
+    app.include_router(
+        _scoped_agent_router(fetch, write_auth=write_auth),
+        prefix="/agents/{agent_id}",
+    )
     return app
 
 
-def create_host_app(host: HostRuntime) -> FastAPI:
+def create_host_app(host: HostRuntime, *, token: str | None = None) -> FastAPI:
+    write_auth = _token_dependency(token) if token else None
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         await host.start()
@@ -215,6 +241,7 @@ def create_host_app(host: HostRuntime) -> FastAPI:
     app = FastAPI(title="MycoAgent Host", version=__version__, lifespan=lifespan)
     app.state.host = host
     app.state.runtime = None
+    app.state.token = token
 
     def _agents() -> list[AgentRuntime]:
         return list(host.agents.values()) or list(host._ordered)
@@ -242,7 +269,10 @@ def create_host_app(host: HostRuntime) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=f"agent not found: {agent_id}") from exc
 
-    app.include_router(_scoped_agent_router(fetch), prefix="/agents/{agent_id}")
+    app.include_router(
+        _scoped_agent_router(fetch, write_auth=write_auth),
+        prefix="/agents/{agent_id}",
+    )
     if len(host._ordered) == 1:
-        app.include_router(_agent_router(lambda: host.default_agent))
+        app.include_router(_agent_router(lambda: host.default_agent, write_auth=write_auth))
     return app

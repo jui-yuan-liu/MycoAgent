@@ -207,6 +207,9 @@ def apply_config_to_hosts(
     host_urls: list[str],
     timeout: float = 10.0,
 ) -> list[str]:
+    from mycoagent.auth import bearer_headers, resolve_token
+
+    headers = bearer_headers(resolve_token())
     warnings: list[str] = []
     for agent, host in zip(config.agents, host_urls):
         body = {
@@ -220,7 +223,12 @@ def apply_config_to_hosts(
             "executor": agent.executor,
         }
         try:
-            response = httpx.post(f"{host.rstrip('/')}/configure", json=body, timeout=timeout)
+            response = httpx.post(
+                f"{host.rstrip('/')}/configure",
+                json=body,
+                headers=headers,
+                timeout=timeout,
+            )
             if response.is_error:
                 warnings.append(f"{host}: HTTP {response.status_code} {response.text[:200]}")
         except Exception as exc:  # noqa: BLE001 — still keep the yaml

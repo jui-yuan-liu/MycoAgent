@@ -1,0 +1,91 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: manager-data
+  namespace: mycoagent
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: manager
+  namespace: mycoagent
+  labels:
+    app: manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: manager
+  template:
+    metadata:
+      labels:
+        app: manager
+    spec:
+      containers:
+        - name: manager
+          image: mycoagent:mvp
+          imagePullPolicy: IfNotPresent
+          args:
+            - python
+            - -m
+            - mycoagent
+            - manager
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "8080"
+            - --bootstrap-group
+            - default
+            - --db
+            - /data/mycoagent.db
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: MYCOAGENT_MANAGER
+              value: http://manager:8080
+            - name: MYCOAGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mycoagent
+                  key: MYCOAGENT_TOKEN
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: manager-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: manager
+  namespace: mycoagent
+  labels:
+    app: manager
+spec:
+  selector:
+    app: manager
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alpha
+  namespace: mycoagent
+  labels:
+    app: alpha
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alpha
+  template:
+    metadata:
+      labels:
+        app: alpha
+    spec:
+      containers:
+        - name: node
+          image: mycoagent:mvp
+          imagePullPolicy: IfNotPresent
+          args:
+            - python
+            - -m
+            - mycoagent
+            - node
+            - --manager
+            - http://manager:8080
+            - --group
+            - default
+            - --name
+            - alpha
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "9001"
+            - --advertise
+            - http://alpha:9001
+            - --skills
+            - coding
+            - --tools
+            - shell
+            - --executor
+            - auto
+            - --id-file
+            - /config/alpha.id
+          ports:
+            - name: http
+              containerPort: 9001
+          env:
+            - name: MYCOAGENT_MANAGER
+              value: http://manager:8080
+            - name: MYCOAGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mycoagent
+                  key: MYCOAGENT_TOKEN
+            - name: MYCOAGENT_S3_ENDPOINT
+              value: http://minio:9000
+            - name: MYCOAGENT_S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mycoagent
+                  key: MYCOAGENT_S3_ACCESS_KEY
+            - name: MYCOAGENT_S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mycoagent
+                  key: MYCOAGENT_S3_SECRET_KEY
+            - name: MYCOAGENT_S3_BUCKET
+              value: mycoagent
+          volumeMounts:
+            - name: config
+              mountPath: /config
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9001
+            initialDelaySeconds: 3
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9001
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: config
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alpha
+  namespace: mycoagent
+  labels:
+    app: alpha
+spec:
+  selector:
+    app: alpha
+  ports:
+    - name: http
+      port: 9001
+      targetPort: 9001

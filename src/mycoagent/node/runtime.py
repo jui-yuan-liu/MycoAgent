@@ -142,6 +142,7 @@ class AgentRuntime:
         llm_api_key: str | None = None,
         llm_model: str | None = None,
         max_steps: int = 12,
+        token: str | None = None,
     ) -> None:
         self.manager_url = manager_url
         self.name = name
@@ -153,6 +154,7 @@ class AgentRuntime:
         self.models = models or []
         self.node_id = node_id
         self.heartbeat_interval = heartbeat_interval
+        self.token = token
         self.record: NodeRecord | None = None
         db_path = job_db if job_db is not None else os.environ.get("MYCOAGENT_JOB_DB")
         self.jobs = jobs or JobStore(path=db_path)
@@ -160,8 +162,8 @@ class AgentRuntime:
         self.planner = planner
         self._own_manager = manager is None
         self._own_mail = mail is None
-        self.manager = manager or ManagerClient(manager_url)
-        self.mail = mail or MailboxClient()
+        self.manager = manager or ManagerClient(manager_url, token=token)
+        self.mail = mail or MailboxClient(token=token)
         self.artifacts: ArtifactStore = artifact_store or MemoryArtifactStore()
         self._child_lock = asyncio.Lock()
         self._current_child: ChildWork | None = None
@@ -579,14 +581,18 @@ class AgentRuntime:
                 ),
                 timeout=self.dispatch_timeout,
             )
-        except TimeoutError as exc:
+        except Exception as exc:  # noqa: BLE001 — any assign failure must not stay ASSIGNED
+            if isinstance(exc, TimeoutError):
+                error = "dispatch timed out"
+            else:
+                error = f"dispatch failed: {exc}"
             await self.jobs.update_subtask(
                 job_id,
                 subtask_id,
                 status=SubtaskStatus.FAILED,
-                error="dispatch timed out",
+                error=error,
             )
-            raise DispatchError("dispatch timed out") from exc
+            raise DispatchError(error) from exc
         await self.jobs.update_subtask(job_id, subtask_id, status=SubtaskStatus.RUNNING)
 
     async def _heartbeat_loop(self) -> None:
@@ -621,6 +627,7 @@ class HostRuntime:
         planner: TaskPlanner | None = None,
         job_db: str | None = None,
         mailbox_queue_size: int = DEFAULT_MAILBOX_QUEUE,
+        token: str | None = None,
     ) -> None:
         if not specs:
             raise ValueError("host needs at least one agent")
@@ -628,8 +635,9 @@ class HostRuntime:
         self.group = group
         self.advertise = advertise.rstrip("/")
         self.heartbeat_interval = heartbeat_interval
-        self.manager = ManagerClient(manager_url)
-        self.mail = MailboxClient()
+        self.token = token
+        self.manager = ManagerClient(manager_url, token=token)
+        self.mail = MailboxClient(token=token)
         self.artifacts: ArtifactStore = artifact_store or MemoryArtifactStore()
         self.agents: dict[str, AgentRuntime] = {}
         self._ordered: list[AgentRuntime] = []
@@ -664,6 +672,7 @@ class HostRuntime:
                 llm_base_url=spec.llm_base_url,
                 llm_api_key=spec.llm_api_key,
                 llm_model=spec.llm_model,
+                token=token,
             )
             self._ordered.append(agent)
 

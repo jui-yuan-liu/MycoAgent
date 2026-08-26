@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
+from starlette.middleware.base import BaseHTTPMiddleware
 
+from mycoagent.auth import check_bearer
 from mycoagent.manager.store import (
     GroupNotFound,
     ManagerStoreProtocol,
@@ -22,7 +24,28 @@ from mycoagent.models import (
 from mycoagent.version import __version__
 
 
-def create_app(store: ManagerStoreProtocol, bootstrap_group: str | None = None) -> FastAPI:
+class _BearerMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, token: str) -> None:
+        super().__init__(app)
+        self._token = token
+
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path != "/health":
+            try:
+                check_bearer(request.headers.get("Authorization"), self._token)
+            except HTTPException as exc:
+                from fastapi.responses import JSONResponse
+
+                return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        return await call_next(request)
+
+
+def create_app(
+    store: ManagerStoreProtocol,
+    bootstrap_group: str | None = None,
+    *,
+    token: str | None = None,
+) -> FastAPI:
     if bootstrap_group:
         try:
             store.create_group(bootstrap_group)
@@ -30,11 +53,13 @@ def create_app(store: ManagerStoreProtocol, bootstrap_group: str | None = None) 
             pass
     app = FastAPI(title="MycoAgent Cluster Manager", version=__version__)
     app.state.store = store
+    app.state.token = token
+    if token:
+        app.add_middleware(_BearerMiddleware, token=token)
 
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok", "role": "cluster-manager"}
-
     @app.post("/groups", response_model=GroupInfo)
     def create_group(body: GroupCreate) -> GroupInfo:
         try:

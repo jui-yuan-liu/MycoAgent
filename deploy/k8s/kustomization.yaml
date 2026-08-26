@@ -1,0 +1,11 @@
+# Resource list only — no overlays. Apply with:
+#   kubectl apply -k deploy/k8s
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - 00-namespace.yaml
+  - 01-secret.yaml
+  - 02-minio.yaml
+  - 03-manager.yaml
+  - 04-node-alpha.yaml
+  - 05-node-beta.yaml

@@ -5,6 +5,7 @@
 | 文件 | 內容 |
 | --- | --- |
 | [快速使用指南](快速使用指南.md) | Docker Compose：`up` → `init` → catalog → submit |
+| [部署指南](部署指南.md) | Compose 與 kubectl 逐步部署（含 `deploy/k8s`） |
 | [Agent 註冊指南](agent註冊指南.md) | 新 agent 入組、必填欄位、與 LLM 連線 |
 | [入門啟用指南](入門啟用指南.md) | 逐步操作、群組政策、forward、FAQ |
 | [系統架構](系統架構.md) | 角色、三層、資料放哪、HTTP 表面 |

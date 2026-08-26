@@ -4,6 +4,7 @@ from typing import Any
 
 import httpx
 
+from mycoagent.auth import bearer_headers
 from mycoagent.models import (
     AssignSubtaskMessage,
     CatalogQuery,
@@ -19,9 +20,20 @@ from mycoagent.models import (
 
 
 class ManagerClient:
-    def __init__(self, base_url: str, timeout: float = 10.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float = 10.0,
+        *,
+        token: str | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
-        self._http = httpx.AsyncClient(base_url=self.base_url, timeout=timeout)
+        self.token = token
+        self._http = httpx.AsyncClient(
+            base_url=self.base_url,
+            timeout=timeout,
+            headers=bearer_headers(token),
+        )
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -122,8 +134,9 @@ class ManagerClient:
 
 
 class MailboxClient:
-    def __init__(self, timeout: float = 10.0) -> None:
-        self._http = httpx.AsyncClient(timeout=timeout)
+    def __init__(self, timeout: float = 10.0, *, token: str | None = None) -> None:
+        self.token = token
+        self._http = httpx.AsyncClient(timeout=timeout, headers=bearer_headers(token))
 
     async def aclose(self) -> None:
         await self._http.aclose()
