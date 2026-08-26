@@ -1,15 +1,25 @@
 # MycoAgent 文件
 
-跨主機的 agent 協作框架：群組、資源目錄、信箱、父 agent 任務記憶。Cluster Manager 只管通訊錄與政策；任務內容與產物不進 Manager。
-
-| 文件 | 內容 |
-| --- | --- |
-| [快速使用指南](快速使用指南.md) | Docker Compose：`up` → `init` → catalog → submit |
-| [部署指南](部署指南.md) | Compose 與 kubectl 逐步部署（含 `deploy/k8s`） |
-| [Agent 註冊指南](agent註冊指南.md) | 新 agent 入組、必填欄位、與 LLM 連線 |
-| [入門啟用指南](入門啟用指南.md) | 逐步操作、群組政策、forward、FAQ |
-| [系統架構](系統架構.md) | 角色、三層、資料放哪、HTTP 表面 |
-| [工作流程](工作流程.md) | 註冊心跳、派工、執行、產物、轉發 |
-| [未來開發計畫](未來開發計畫.md) | 已完成／下一步／刻意不做 |
+跨主機的 agent 協作框架：群組、資源目錄、HTTP 信箱、父 agent 任務記憶。Cluster Manager 只管通訊錄與政策；任務內容與產物不進 Manager。
 
 程式進入點：`python -m mycoagent`（`manager`／`node`／`init`／`ctl`）。
+
+## 建議閱讀順序
+
+| 順序 | 文件 | 內容 |
+| --- | --- | --- |
+| 1 | [Quick Start（Docker）](getting-started/quickstart.md) | `up` → `init` → catalog → submit |
+| 1b | [本機安裝（venv）](getting-started/local-setup.md) | 三終端最小路徑 |
+| 2 | [功能說明](concepts/overview.md) | 群組、目錄、父記憶、執行器、產物 |
+| 3 | [系統架構](concepts/architecture.md) | 角色、流程、HTTP 表面 |
+| 4 | [init 參數說明](reference/init.md) | `mycoagent init` 與推薦設置 |
+| 4b | [CLI 參考](reference/cli.md) | `manager`／`node`／`ctl`、環境變數 |
+| 5 | [自訂群組](guides/custom-groups.md) | 政策、核准、forward |
+| 6 | [加入 Agent](guides/add-agents.md) | 新 Host、欄位、LLM、OpenCode |
+| 7 | [部署](guides/deploy.md) | Compose 進階、Kubernetes |
+| 附錄 | [常見問題](reference/faq.md) | advertise、心跳、派工 |
+| 附錄 | [範圍與限制](concepts/limitations.md) | 產品邊界、已知限制 |
+
+## 內部文件
+
+[`docs/agents/`](agents/) 供 Cursor／貢獻者 agent 使用，不列入公開閱讀路徑。
