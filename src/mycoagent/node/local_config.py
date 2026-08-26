@@ -7,6 +7,7 @@ import httpx
 import yaml
 from pydantic import BaseModel, Field
 
+from mycoagent.node.capabilities import merge_names
 from mycoagent.node.runtime import AgentSpec
 from mycoagent.node.specs import parse_models
 
@@ -77,9 +78,12 @@ def save_local_config(path: str | Path, config: LocalAgentsFile) -> Path:
 def agent_is_configured(agent: LocalAgentConfig) -> bool:
     if not agent.name.strip():
         return False
+    mode = agent.executor.strip().lower()
+    if mode == "opencode":
+        return True
     if agent.llm_url.strip():
         return True
-    return agent.executor.strip().lower() == "echo"
+    return mode == "echo"
 
 
 def is_configured(config: LocalAgentsFile | None) -> bool:
@@ -99,13 +103,25 @@ def select_agent(config: LocalAgentsFile, name: str | None) -> LocalAgentConfig:
     raise KeyError(f"{CONFIG_FILENAME} has multiple agents; pass --name")
 
 
-def spec_from_local(entry: LocalAgentConfig) -> AgentSpec:
+def spec_from_local(
+    entry: LocalAgentConfig,
+    *,
+    opencode_bin: str | None = None,
+    opencode_timeout: float = 120.0,
+    opencode_model: str | None = None,
+    opencode_agent: str | None = None,
+    opencode_auto: bool = False,
+    opencode_attach: str | None = None,
+    opencode_config: str | None = None,
+    opencode_config_dir: str | None = None,
+) -> AgentSpec:
     from mycoagent.node.executor import EchoExecutor
+    from mycoagent.node.opencode import OpenCodeExecutor
 
     models = parse_models(",".join(entry.models)) if entry.models else []
     mode = (entry.executor or "auto").strip().lower()
     llm_url = entry.llm_url.strip() or None
-    if mode == "echo":
+    if mode in {"echo", "opencode"}:
         llm_url = None
     spec = AgentSpec(
         name=entry.name,
@@ -118,6 +134,17 @@ def spec_from_local(entry: LocalAgentConfig) -> AgentSpec:
     )
     if mode == "echo":
         spec.executor = EchoExecutor()
+    elif mode == "opencode":
+        spec.executor = OpenCodeExecutor(
+            binary=opencode_bin,
+            timeout=opencode_timeout,
+            model=opencode_model,
+            agent=opencode_agent,
+            auto=opencode_auto,
+            attach=opencode_attach,
+            config=opencode_config,
+            config_dir=opencode_config_dir,
+        )
     return spec
 
 
@@ -126,13 +153,46 @@ def default_agents(
     llm_url: str = "",
     llm_model: str = "",
     llm_key: str = "",
+    executor: str | None = None,
 ) -> LocalAgentsFile:
-    executor = "auto" if llm_url.strip() else "echo"
+    if executor and executor.strip():
+        mode = executor.strip().lower()
+    else:
+        mode = "auto" if llm_url.strip() else "echo"
     models = [f"{llm_model}:local:8192"] if llm_model.strip() else []
+    skills = ["coding"]
+    tools = ["shell"]
+    if mode == "opencode":
+        from mycoagent.node.opencode_discover import discover_opencode_catalog
+
+        found_skills, found_tools = discover_opencode_catalog()
+        skills = merge_names(skills, found_skills) if found_skills else skills
+        tools = merge_names(tools, found_tools)
+        llm_url = ""
+        llm_model = ""
+        models = []
     return LocalAgentsFile(
         agents=[
-            _seed_agent("alpha", llm_url=llm_url, llm_model=llm_model, llm_key=llm_key, executor=executor, models=models),
-            _seed_agent("beta", llm_url=llm_url, llm_model=llm_model, llm_key=llm_key, executor=executor, models=models),
+            _seed_agent(
+                "alpha",
+                llm_url=llm_url,
+                llm_model=llm_model,
+                llm_key=llm_key,
+                executor=mode,
+                models=models,
+                skills=skills,
+                tools=tools,
+            ),
+            _seed_agent(
+                "beta",
+                llm_url=llm_url,
+                llm_model=llm_model,
+                llm_key=llm_key,
+                executor=mode,
+                models=models,
+                skills=skills,
+                tools=tools,
+            ),
         ]
     )
 
@@ -143,16 +203,26 @@ def apply_flags(
     llm_url: str | None = None,
     llm_model: str | None = None,
     llm_key: str | None = None,
+    executor: str | None = None,
 ) -> LocalAgentsFile:
     for agent in config.agents:
-        if llm_url is not None:
+        if executor is not None:
+            agent.executor = executor.strip() or agent.executor
+            if agent.executor == "opencode":
+                agent.llm_url = ""
+                from mycoagent.node.opencode_discover import discover_opencode_catalog
+
+                found_skills, found_tools = discover_opencode_catalog()
+                agent.skills = merge_names(agent.skills, found_skills)
+                agent.tools = merge_names(agent.tools, found_tools)
+        if llm_url is not None and agent.executor != "opencode":
             agent.llm_url = llm_url
             agent.executor = "auto" if llm_url.strip() else "echo"
-        if llm_model is not None:
+        if llm_model is not None and agent.executor != "opencode":
             agent.llm_model = llm_model
-        if llm_key is not None:
+        if llm_key is not None and agent.executor != "opencode":
             agent.llm_key = llm_key
-        if agent.llm_model.strip() and not agent.models:
+        if agent.llm_model.strip() and not agent.models and agent.executor != "opencode":
             agent.models = [f"{agent.llm_model}:local:8192"]
     return config
 
@@ -247,11 +317,13 @@ def _seed_agent(
     llm_key: str,
     executor: str,
     models: list[str],
+    skills: list[str] | None = None,
+    tools: list[str] | None = None,
 ) -> LocalAgentConfig:
     return LocalAgentConfig(
         name=name,
-        skills=["coding"],
-        tools=["shell"],
+        skills=list(skills) if skills is not None else ["coding"],
+        tools=list(tools) if tools is not None else ["shell"],
         executor=executor,
         llm_url=llm_url,
         llm_model=llm_model,

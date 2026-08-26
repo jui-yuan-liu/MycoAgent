@@ -240,7 +240,13 @@ class AgentRuntime:
         if body.llm_model is not None:
             self.llm_model = body.llm_model.strip() or None
         mode = (body.executor or "auto").strip().lower()
-        if mode == "echo" or not self.llm_base_url:
+        if mode == "opencode":
+            from mycoagent.node.opencode import OpenCodeExecutor
+
+            self.llm_base_url = None
+            self.executor = OpenCodeExecutor()
+            self.planner = None
+        elif mode == "echo" or not self.llm_base_url:
             self.executor = EchoExecutor()
             self.planner = None
         else:

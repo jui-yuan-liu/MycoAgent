@@ -111,6 +111,28 @@ python -m mycoagent node --manager http://127.0.0.1:8080 --group default \
 
 Docker 裡連 Mac 上的 oMLX：`python -m mycoagent init --provider omlx`（容器內 URL 是 `http://host.docker.internal:8000/v1`）。oMLX 若開了 `--api-key`，init 再加 `--llm-key`。
 
+## 本機 OpenCode Host（推薦：把已設定好的 OpenCode 當執行器）
+
+MycoAgent 管群組、目錄、信箱、父 JobMemory、工作區回收；**OpenCode 管 LLM／skills／MCP／權限**（沿用你本機已有的設定）。
+
+```bash
+# Manager／MinIO 可用 Compose；這個 Host 請在 Mac 本機跑（容器裡通常沒有你的 opencode）
+python -m mycoagent node \
+  --manager http://127.0.0.1:8080 \
+  --group default \
+  --name gamma \
+  --port 9003 \
+  --advertise http://127.0.0.1:9003 \
+  --executor opencode
+```
+
+- 未手寫 `--skills` 時，會掃描 `~/.config/opencode/skills`、`~/.claude/skills`、`~/.agents/skills`（與 `OPENCODE_CONFIG_DIR/skills`）並註冊進 catalog；tools 會帶標籤 `opencode`。
+- 子行程**保留真實 HOME**，因此 OpenCode 仍讀你的 auth、全域 skills、MCP。
+- 可選：`--opencode-model provider/model`、`--opencode-agent`、`--opencode-auto`、`--opencode-attach http://127.0.0.1:4096`（接已跑的 `opencode serve`）、`--opencode-skills-dir`（額外 skills 目錄）、`MYCOAGENT_OPENCODE_BIN`。
+- 設定檔：`init --yes --executor opencode` 或 `--provider opencode`。
+
+Docker 容器預設**沒有**本機 `opencode` 與 `~/.config/opencode`；此模式請本機跑 Host，不要指望 Compose 裡的 node-a／node-b 直接套用你的 OpenCode。
+
 Docker 裡「這台 Host 自己的 LLM」：該 service 設自己的 `MYCOAGENT_LLM_*`（一容器一組仍最單純），或跑 `python -m mycoagent init` 寫入 `/config/agents.yaml` 並 `POST /configure`。容器內不要用 `127.0.0.1` 指主機上的 oMLX／Ollama。
 
 父切分也走同一套 LLM client（有連線才會自動切 subtasks）。信箱協定不變。

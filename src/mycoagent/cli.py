@@ -131,6 +131,46 @@ def node(
         help="opencode binary when --executor opencode (default: opencode)",
     ),
     opencode_timeout: float = typer.Option(120.0, "--opencode-timeout"),
+    opencode_model: Optional[str] = typer.Option(
+        None,
+        "--opencode-model",
+        envvar="MYCOAGENT_OPENCODE_MODEL",
+        help="opencode run --model provider/model",
+    ),
+    opencode_agent: Optional[str] = typer.Option(
+        None,
+        "--opencode-agent",
+        envvar="MYCOAGENT_OPENCODE_AGENT",
+        help="opencode run --agent name",
+    ),
+    opencode_auto: bool = typer.Option(
+        False,
+        "--opencode-auto",
+        help="Pass --auto to opencode run (auto-approve permissions)",
+    ),
+    opencode_attach: Optional[str] = typer.Option(
+        None,
+        "--opencode-attach",
+        envvar="MYCOAGENT_OPENCODE_ATTACH",
+        help="Attach to opencode serve URL (e.g. http://127.0.0.1:4096)",
+    ),
+    opencode_config: Optional[str] = typer.Option(
+        None,
+        "--opencode-config",
+        envvar="OPENCODE_CONFIG",
+        help="Set OPENCODE_CONFIG for the child process",
+    ),
+    opencode_config_dir: Optional[str] = typer.Option(
+        None,
+        "--opencode-config-dir",
+        envvar="OPENCODE_CONFIG_DIR",
+        help="Set OPENCODE_CONFIG_DIR for the child process",
+    ),
+    opencode_skills_dir: Optional[list[str]] = typer.Option(
+        None,
+        "--opencode-skills-dir",
+        help="Extra OpenCode skills directory to merge into catalog (repeatable)",
+    ),
     heartbeat_interval: float = 5.0,
     id_file: Optional[str] = typer.Option(
         None,
@@ -171,6 +211,12 @@ def node(
         max_steps,
         opencode_bin=opencode_bin,
         opencode_timeout=opencode_timeout,
+        opencode_model=opencode_model,
+        opencode_agent=opencode_agent,
+        opencode_auto=opencode_auto,
+        opencode_attach=opencode_attach,
+        opencode_config=opencode_config,
+        opencode_config_dir=opencode_config_dir,
     )
     artifacts = artifact_store_from_env()
     specs = _resolve_specs(
@@ -184,6 +230,16 @@ def node(
         capabilities_file=capabilities_file,
         id_file=id_file,
         config_path=config,
+        executor_name=executor_name,
+        opencode_skills_dirs=opencode_skills_dir,
+        opencode_bin=opencode_bin,
+        opencode_timeout=opencode_timeout,
+        opencode_model=opencode_model,
+        opencode_agent=opencode_agent,
+        opencode_auto=opencode_auto,
+        opencode_attach=opencode_attach,
+        opencode_config=opencode_config,
+        opencode_config_dir=opencode_config_dir,
     )
     attach_spec_llms(specs, max_steps=max_steps)
     if len(specs) == 1 and specs[0].root_mailbox:
@@ -241,11 +297,16 @@ def init(
     provider: Optional[str] = typer.Option(
         None,
         "--provider",
-        help="echo, omlx (localhost:8000/v1), ollama (localhost:11434/v1), or custom",
+        help="echo, omlx, ollama, custom, or opencode (local OpenCode Host; LLM via OpenCode)",
     ),
     llm_url: Optional[str] = typer.Option(None, "--llm-url", help="OpenAI-compatible base URL (empty = Echo)"),
     llm_model: Optional[str] = typer.Option(None, "--llm-model", help="If omitted, init lists GET /v1/models and uses the first chat model"),
     llm_key: Optional[str] = typer.Option(None, "--llm-key", help="Optional API key"),
+    executor: Optional[str] = typer.Option(
+        None,
+        "--executor",
+        help="Force executor in agents.yaml: echo, auto, agent, or opencode",
+    ),
     host_url: Optional[list[str]] = typer.Option(
         None,
         "--host-url",
@@ -262,7 +323,11 @@ def init(
         raise typer.Exit(code=0)
     resolved_url = llm_url
     resolved_model = llm_model
-    if provider or (llm_url and not llm_model):
+    forced_executor = (executor or "").strip().lower() or None
+    if (provider or "").strip().lower() == "opencode":
+        forced_executor = "opencode"
+        resolved_url, resolved_model = "", ""
+    elif provider or (llm_url and not llm_model):
         try:
             resolved_url, resolved_model, resolve_notes = resolve_for_init(
                 provider,
@@ -279,21 +344,24 @@ def init(
             llm_url=resolved_url or "",
             llm_model=resolved_model or "",
             llm_key=llm_key or "",
+            executor=forced_executor,
         )
         file = apply_flags(
             file,
             llm_url=resolved_url if resolved_url is not None else llm_url,
             llm_model=resolved_model if resolved_model is not None else llm_model,
             llm_key=llm_key,
+            executor=forced_executor,
         )
         if not file.agents:
             file = default_agents(
                 llm_url=resolved_url or "",
                 llm_model=resolved_model or "",
                 llm_key=llm_key or "",
+                executor=forced_executor,
             )
     else:
-        file = _init_wizard(existing, provider=provider)
+        file = _init_wizard(existing, provider=provider, executor=forced_executor)
     warned: list[str] = []
     seen_urls: set[str] = set()
     for agent in file.agents:
@@ -317,26 +385,53 @@ def init(
             typer.echo(f"Applied to {len(list(zip(file.agents, urls)))} Host(s)")
 
 
-def _init_wizard(existing: LocalAgentsFile | None, *, provider: str | None = None) -> LocalAgentsFile:
+def _init_wizard(
+    existing: LocalAgentsFile | None,
+    *,
+    provider: str | None = None,
+    executor: str | None = None,
+) -> LocalAgentsFile:
     seeds = (
         list(existing.agents)
         if existing and existing.agents
-        else default_agents().agents
+        else default_agents(executor=executor).agents
     )
     out: list[LocalAgentConfig] = []
     preferred = (provider or "").strip().lower() or detect_preferred_provider()
+    if (executor or "").strip().lower() == "opencode":
+        preferred = "opencode"
     for seed in seeds:
         typer.echo(f"--- {seed.name} ---")
         name = typer.prompt("Name", default=seed.name)
         skills = _csv(typer.prompt("Skills (comma-separated)", default=",".join(seed.skills) or "coding"))
         tools = _csv(typer.prompt("Tools (comma-separated)", default=",".join(seed.tools) or "shell"))
-        seed_provider = infer_provider(seed.llm_url) if seed.llm_url.strip() else preferred
+        if seed.executor.strip().lower() == "opencode":
+            seed_provider = "opencode"
+        else:
+            seed_provider = infer_provider(seed.llm_url) if seed.llm_url.strip() else preferred
         chosen = typer.prompt(
-            "Provider (echo / omlx / ollama / custom)",
+            "Provider (echo / omlx / ollama / custom / opencode)",
             default=seed_provider,
         ).strip().lower()
+        if chosen == "opencode":
+            from mycoagent.node.opencode_discover import discover_opencode_catalog
+
+            found_skills, found_tools = discover_opencode_catalog()
+            out.append(
+                LocalAgentConfig(
+                    name=name,
+                    skills=merge_names(skills or ["coding"], found_skills),
+                    tools=merge_names(tools or ["shell"], found_tools),
+                    executor="opencode",
+                    llm_url="",
+                    llm_model="",
+                    llm_key="",
+                    models=[],
+                )
+            )
+            continue
         if chosen not in PROVIDERS:
-            raise typer.BadParameter(f"provider must be one of {', '.join(PROVIDERS)}")
+            raise typer.BadParameter(f"provider must be one of {', '.join(PROVIDERS)}, opencode")
         if chosen == "echo":
             out.append(
                 LocalAgentConfig(
@@ -410,6 +505,12 @@ def _executor_and_planner(
     *,
     opencode_bin: str | None = None,
     opencode_timeout: float = 120.0,
+    opencode_model: str | None = None,
+    opencode_agent: str | None = None,
+    opencode_auto: bool = False,
+    opencode_attach: str | None = None,
+    opencode_config: str | None = None,
+    opencode_config_dir: str | None = None,
 ):
     llm = llm_from_env()
     mode = executor_name.strip().lower()
@@ -417,7 +518,19 @@ def _executor_and_planner(
         raise typer.BadParameter("--executor must be auto, echo, agent, or opencode")
     planner = TaskPlanner(llm) if llm is not None else None
     if mode == "opencode":
-        return OpenCodeExecutor(binary=opencode_bin, timeout=opencode_timeout), planner
+        return (
+            OpenCodeExecutor(
+                binary=opencode_bin,
+                timeout=opencode_timeout,
+                model=opencode_model,
+                agent=opencode_agent,
+                auto=opencode_auto,
+                attach=opencode_attach,
+                config=opencode_config,
+                config_dir=opencode_config_dir,
+            ),
+            planner,
+        )
     if mode == "echo" or (mode == "auto" and llm is None):
         return EchoExecutor(), planner
     if llm is None:
@@ -496,9 +609,19 @@ def _resolve_specs(
     capabilities_file: str | None = None,
     id_file: str | None = None,
     config_path: str | None = None,
+    executor_name: str = "auto",
+    opencode_skills_dirs: list[str] | None = None,
+    opencode_bin: str | None = None,
+    opencode_timeout: float = 120.0,
+    opencode_model: str | None = None,
+    opencode_agent: str | None = None,
+    opencode_auto: bool = False,
+    opencode_attach: str | None = None,
+    opencode_config: str | None = None,
+    opencode_config_dir: str | None = None,
 ) -> list[AgentSpec]:
     if agents:
-        return _agent_specs(
+        specs = _agent_specs(
             agents,
             name=name,
             skills=skills,
@@ -509,17 +632,41 @@ def _resolve_specs(
             capabilities_file=capabilities_file,
             id_file=id_file,
         )
+        return _merge_opencode_catalog(
+            specs,
+            executor_name=executor_name,
+            skills_explicit=bool(skills or skills_file or capabilities_file),
+            tools_explicit=bool(tools or tools_file or capabilities_file),
+            opencode_skills_dirs=opencode_skills_dirs,
+        )
     loaded = load_local_config(config_path) if config_path else None
     if loaded is not None:
         try:
             entry = select_agent(loaded, name)
         except KeyError as exc:
             raise typer.BadParameter(str(exc)) from exc
-        spec = spec_from_local(entry)
+        spec = spec_from_local(
+            entry,
+            opencode_bin=opencode_bin,
+            opencode_timeout=opencode_timeout,
+            opencode_model=opencode_model,
+            opencode_agent=opencode_agent,
+            opencode_auto=opencode_auto,
+            opencode_attach=opencode_attach,
+            opencode_config=opencode_config,
+            opencode_config_dir=opencode_config_dir,
+        )
         spec.root_mailbox = True
         spec.agent_id = resolve_agent_id(id_file=id_file)
-        return [spec]
-    return _agent_specs(
+        mode = (entry.executor or executor_name or "auto").strip().lower()
+        return _merge_opencode_catalog(
+            [spec],
+            executor_name=mode,
+            skills_explicit=bool(entry.skills),
+            tools_explicit=bool(entry.tools) and entry.tools != ["shell"],
+            opencode_skills_dirs=opencode_skills_dirs,
+        )
+    specs = _agent_specs(
         None,
         name=name,
         skills=skills,
@@ -530,6 +677,39 @@ def _resolve_specs(
         capabilities_file=capabilities_file,
         id_file=id_file,
     )
+    return _merge_opencode_catalog(
+        specs,
+        executor_name=executor_name,
+        skills_explicit=bool(skills or skills_file or capabilities_file),
+        tools_explicit=bool(tools or tools_file or capabilities_file),
+        opencode_skills_dirs=opencode_skills_dirs,
+    )
+
+
+def _merge_opencode_catalog(
+    specs: list[AgentSpec],
+    *,
+    executor_name: str,
+    skills_explicit: bool,
+    tools_explicit: bool,
+    opencode_skills_dirs: list[str] | None,
+) -> list[AgentSpec]:
+    del tools_explicit
+    if executor_name.strip().lower() != "opencode":
+        return specs
+    from mycoagent.node.opencode_discover import discover_opencode_catalog
+
+    discovered_skills, discovered_tools = discover_opencode_catalog(
+        extra_dirs=opencode_skills_dirs
+    )
+    for spec in specs:
+        if not skills_explicit:
+            spec.skills = merge_names(spec.skills, discovered_skills)
+        else:
+            # Still surface discovered names alongside explicit catalog tags.
+            spec.skills = merge_names(spec.skills, discovered_skills)
+        spec.tools = merge_names(spec.tools, discovered_tools)
+    return specs
 
 
 def _agent_specs(

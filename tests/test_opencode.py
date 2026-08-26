@@ -35,10 +35,11 @@ def test_extract_opencode_text_from_json_and_raw():
 async def test_opencode_executor_runs_in_workspace_and_strips_paths():
     captured: dict[str, object] = {}
 
-    def runner(argv: list[str], cwd: Path, timeout: float) -> tuple[int, str, str]:
+    def runner(argv: list[str], cwd: Path, timeout: float, env: dict[str, str]) -> tuple[int, str, str]:
         captured["argv"] = argv
         captured["cwd"] = cwd
         captured["timeout"] = timeout
+        captured["env"] = env
         note = cwd / "note.txt"
         note.write_text("ok", encoding="utf-8")
         return 0, json.dumps({"text": f"wrote {cwd}"}), ""
@@ -54,11 +55,13 @@ async def test_opencode_executor_runs_in_workspace_and_strips_paths():
         assert captured["argv"][0] == "opencode"
         assert captured["argv"][1:4] == ["run", "--format", "json"]
         assert "write a note" in captured["argv"][4]
+        assert isinstance(captured["env"], dict)
+        assert captured["env"].get("HOME") != str(workspace.root)
 
 
 async def test_opencode_executor_nonzero_exit_fails():
-    def runner(argv: list[str], cwd: Path, timeout: float) -> tuple[int, str, str]:
-        del argv, cwd, timeout
+    def runner(argv: list[str], cwd: Path, timeout: float, env: dict[str, str]) -> tuple[int, str, str]:
+        del argv, cwd, timeout, env
         return 2, "", "boom"
 
     with assignment_workspace() as workspace:
@@ -68,7 +71,7 @@ async def test_opencode_executor_nonzero_exit_fails():
 
 async def test_opencode_executor_requires_workspace():
     with pytest.raises(RuntimeError, match="workspace"):
-        await OpenCodeExecutor(runner=lambda *_: (0, "x", "")).run(_work(), None)
+        await OpenCodeExecutor(runner=lambda *a: (0, "x", "")).run(_work(), None)
 
 
 async def test_opencode_executor_missing_binary():

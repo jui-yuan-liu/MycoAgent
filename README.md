@@ -62,13 +62,15 @@ Agent 發現 Manager 用 `--manager` 或環境變數 `MYCOAGENT_MANAGER`（例�
 
 未設定 `MYCOAGENT_LLM_BASE_URL` 時 `--executor auto` 是 Echo（測試／demo）。設定後子 agent 走內建 tool-calling loop，且不帶 `--subtask` 的 `POST /jobs` 會依目錄切分。規劃失敗則 job `failed`。
 
-要用本機 OpenCode 當子執行器（協作層不變）：
+要用本機 OpenCode 當子執行器（協作層不變；LLM／skills 用你本機已設好的）：
 
 ```bash
-python -m mycoagent node --manager http://127.0.0.1:8080 --group default --name beta \
-  --port 9002 --executor opencode
-# 可選：MYCOAGENT_OPENCODE_BIN、--opencode-timeout
+python -m mycoagent node --manager http://127.0.0.1:8080 --group default --name gamma \
+  --port 9003 --advertise http://127.0.0.1:9003 --executor opencode
+# 可選：MYCOAGENT_OPENCODE_BIN、--opencode-model、--opencode-attach、--opencode-timeout
 ```
+
+詳見 [Agent 註冊指南](docs/agent註冊指南.md)「本機 OpenCode Host」。
 
 產物庫：`MYCOAGENT_S3_ENDPOINT`、`MYCOAGENT_S3_ACCESS_KEY`、`MYCOAGENT_S3_SECRET_KEY`、`MYCOAGENT_S3_BUCKET`（未設定則行程內假 S3，僅供本機）。
 
